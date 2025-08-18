@@ -22,4 +22,4 @@ double calculate_option_price(double S, double X, double r, double time, double 
     } else {
         return (X * exp(-r * time) * N(-d2)) - (S * N(-d1));
     }
-}
+} 
