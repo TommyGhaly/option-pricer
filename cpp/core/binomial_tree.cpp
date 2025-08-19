@@ -6,7 +6,7 @@
 double priceOptionBinTree(double S, double K, double r, double sigma, double T, int N, bool is_call) {
     double dt = T / N; // Time step
     double u = std::exp(sigma * sqrt(dt)); // Up factor
-    double d = 1.0 / u; // Down factor 
+    double d = 1.0 / u; // Down factor
     double p = (std::exp(r * dt) -d) / (u -d); // Risk-neutral probability
     double discount = std::exp(-r * dt); // Discount factor
 
@@ -26,7 +26,7 @@ double priceOptionBinTree(double S, double K, double r, double sigma, double T, 
         } else {
             optionValues[i] = std::max(0.0, K - assetsPrices[i]);
         }
-
+    }
 
     // Backward induction to calculate option price at time 0
     for (int step = N - 1; step >= 0; --step) {
