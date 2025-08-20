@@ -14,7 +14,7 @@ double N(double x) {
     return std::erfc(-x / sqrt(2)) / 2;
 }
 
-double calculate_option_price(double S, double X, double r, double time, double sigma, bool is_call) {
+double black_scholes(double S, double X, double r, double time, double sigma, bool is_call) {
     double d1 = d_1(S, X, r, time, sigma);
     double d2 = d_2(S, X, r, time, sigma);
     if (is_call) {

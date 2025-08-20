@@ -25,7 +25,7 @@ void runComparison(const TestCase& test) {
     std::cout << "----------------------------------------\n";
 
     // Calculate Black-Scholes price
-    double bs_price = calculate_option_price(test.S, test.K, test.r, test.T, test.sigma, test.is_call);
+    double bs_price = black_scholes(test.S, test.K, test.r, test.T, test.sigma, test.is_call);
 
     std::cout << std::fixed << std::setprecision(6);
     std::cout << "Black-Scholes Price: " << bs_price << "\n\n";
@@ -37,7 +37,7 @@ void runComparison(const TestCase& test) {
     std::vector<int> steps = {10, 25, 50, 100, 200, 500, 1000};
 
     for (int N : steps) {
-        double bin_price = priceOptionBinTree(test.S, test.K, test.r, test.sigma, test.T, N, test.is_call);
+        double bin_price = binomial_tree(test.S, test.K, test.r, test.sigma, test.T, N, test.is_call);
         double diff = bin_price - bs_price;
         double error_pct = (std::abs(diff) / bs_price) * 100;
 
@@ -56,8 +56,8 @@ void runPutCallParityTest() {
     double S = 100, K = 100, r = 0.05, sigma = 0.2, T = 1.0;
 
     // Black-Scholes
-    double bs_call = calculate_option_price(S, K, r, T, sigma, true);
-    double bs_put = calculate_option_price(S, K, r, T, sigma, false);
+    double bs_call = black_scholes(S, K, r, T, sigma, true);
+    double bs_put = black_scholes(S, K, r, T, sigma, false);
     double bs_parity = bs_call - bs_put;
     double theoretical_parity = S - K * std::exp(-r * T);
 
@@ -68,8 +68,8 @@ void runPutCallParityTest() {
     std::cout << "Difference: " << std::abs(bs_parity - theoretical_parity) << "\n\n";
 
     // Binomial with 500 steps
-    double bin_call = priceOptionBinTree(S, K, r, sigma, T, 500, true);
-    double bin_put = priceOptionBinTree(S, K, r, sigma, T, 500, false);
+    double bin_call = binomial_tree(S, K, r, sigma, T, 500, true);
+    double bin_put = binomial_tree(S, K, r, sigma, T, 500, false);
     double bin_parity = bin_call - bin_put;
 
     std::cout << "Binomial (500 steps):\n";
@@ -100,12 +100,12 @@ void runFullGreeksTest() {
         std::cout << "----------------------------------------\n";
 
         // Current price
-        double price = calculate_option_price(S, K, r, T, sigma, is_call);
+        double price = black_scholes(S, K, r, T, sigma, is_call);
         std::cout << "Option Price: " << price << "\n\n";
 
         // DELTA - first derivative w.r.t. S
-        double price_up = calculate_option_price(S + dS, K, r, T, sigma, is_call);
-        double price_down = calculate_option_price(S - dS, K, r, T, sigma, is_call);
+        double price_up = black_scholes(S + dS, K, r, T, sigma, is_call);
+        double price_down = black_scholes(S - dS, K, r, T, sigma, is_call);
         double fd_delta = (price_up - price_down) / (2 * dS);
         double analytical_delta = delta(S, K, r, T, sigma, is_call);
 
@@ -124,7 +124,7 @@ void runFullGreeksTest() {
         std::cout << "  Absolute Error:     " << std::abs(analytical_gamma - fd_gamma) << "\n\n";
 
         // THETA - derivative w.r.t. time (negative because we decrease T)
-        double price_t_down = calculate_option_price(S, K, r, T - dT, sigma, is_call);
+        double price_t_down = black_scholes(S, K, r, T - dT, sigma, is_call);
         double fd_theta = -(price - price_t_down) / dT;  // Negative because option loses value as time passes
         double analytical_theta = theta(S, K, r, T, sigma, is_call);
 
@@ -134,8 +134,8 @@ void runFullGreeksTest() {
         std::cout << "  Absolute Error:     " << std::abs(analytical_theta - fd_theta) << "\n\n";
 
         // VEGA - derivative w.r.t. volatility
-        double price_sigma_up = calculate_option_price(S, K, r, T, sigma + dSigma, is_call);
-        double price_sigma_down = calculate_option_price(S, K, r, T, sigma - dSigma, is_call);
+        double price_sigma_up = black_scholes(S, K, r, T, sigma + dSigma, is_call);
+        double price_sigma_down = black_scholes(S, K, r, T, sigma - dSigma, is_call);
         double fd_vega = (price_sigma_up - price_sigma_down) / (2 * dSigma);
         double analytical_vega = vega(S, K, r, T, sigma);
 
@@ -145,8 +145,8 @@ void runFullGreeksTest() {
         std::cout << "  Absolute Error:     " << std::abs(analytical_vega - fd_vega) << "\n\n";
 
         // RHO - derivative w.r.t. interest rate
-        double price_r_up = calculate_option_price(S, K, r + dR, T, sigma, is_call);
-        double price_r_down = calculate_option_price(S, K, r - dR, T, sigma, is_call);
+        double price_r_up = black_scholes(S, K, r + dR, T, sigma, is_call);
+        double price_r_down = black_scholes(S, K, r - dR, T, sigma, is_call);
         double fd_rho = (price_r_up - price_r_down) / (2 * dR);
         double analytical_rho = rho(S, K, r, T, sigma, is_call);
 

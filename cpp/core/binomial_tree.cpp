@@ -3,7 +3,7 @@
 #include <cmath>
 #include <vector>
 
-double priceOptionBinTree(double S, double K, double r, double sigma, double T, int N, bool is_call) {
+double binomial_tree(double S, double K, double r, double sigma, double T, int N, bool is_call) {
     double dt = T / N; // Time step
     double u = std::exp(sigma * sqrt(dt)); // Up factor
     double d = 1.0 / u; // Down factor
