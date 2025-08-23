@@ -21,13 +21,12 @@ A high-performance option pricing library combining C++ computational engine wit
   - C++ core for speed
   - Vectorized operations
   - Parallel Monte Carlo
-  - GPU acceleration support
 
 ## Installation
 
 ```bash
 # Clone repository
-git clone https://github.com/yourusername/option-pricer.git
+git clone https://github.com/tommyghaly/option-pricer.git
 cd option-pricer
 
 # Create virtual environment

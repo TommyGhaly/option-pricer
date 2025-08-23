@@ -201,3 +201,20 @@ std::vector<double> polynomial_regression(const std::vector<double>& X, const st
 
     return {a0, a1, a2};
 }
+
+
+extern "C" {
+    double mc_asian_option(
+        double S, double K, double r, double sigma,
+        double T, int steps, int num_simulations, int is_call
+    ) {
+        return monte_carlo_asian_option(S, K, r, sigma, T, steps, num_simulations, is_call != 0);
+    }
+
+    double mc_american_option(
+        double S, double K, double r, double sigma,
+        double T, int steps, int num_simulations, int is_call
+    ) {
+        return monte_carlo_american_option(S, K, r, sigma, T, steps, num_simulations, is_call != 0);
+    }
+}

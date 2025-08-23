@@ -23,3 +23,11 @@ double black_scholes(double S, double X, double r, double time, double sigma, bo
         return (X * exp(-r * time) * N(-d2)) - (S * N(-d1));
     }
 }
+
+extern "C" {
+    double bs_option_price(double S, double X, double r,
+                           double time, double sigma, int is_call) {
+        // convert int to bool
+        return black_scholes(S, X, r, time, sigma, is_call != 0);
+    }
+}

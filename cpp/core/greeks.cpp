@@ -44,3 +44,25 @@ double rho(double S, double K, double r, double T, double sigma, bool is_call) {
         return -term * N(-d2); // For put options, rho is negative of call rho
     }
 }
+
+extern "C" {
+    double delta_wrapper(double S, double K, double r, double T, double sigma, int is_call) {
+        return delta(S, K, r, T, sigma, is_call != 0);
+    }
+
+    double gamma_wrapper(double S, double K, double r, double T, double sigma) {
+        return gamma(S, K, r, T, sigma);
+    }
+
+    double theta_wrapper(double S, double K, double r, double T, double sigma, int is_call) {
+        return theta(S, K, r, T, sigma, is_call != 0);
+    }
+
+    double vega_wrapper(double S, double K, double r, double T, double sigma) {
+        return vega(S, K, r, T, sigma);
+    }
+
+    double rho_wrapper(double S, double K, double r, double T, double sigma, int is_call) {
+        return rho(S, K, r, T, sigma, is_call != 0);
+    }
+}
