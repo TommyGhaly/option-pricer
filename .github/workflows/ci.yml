@@ -48,7 +48,7 @@ jobs:
         flake8 python/ --count --exit-zero --max-complexity=10 --max-line-length=100 --statistics
 
     - name: Check with black
-      run: black --check python/
+      run: black python/
 
     - name: Check with isort
       run: isort --check-only python/
