@@ -63,9 +63,14 @@ double monte_carlo_american_option(double S, double K, double r, double sigma, d
     double dt = T / steps;
     std::vector<std::vector<double>> paths(num_simulations, std::vector<double>(steps + 1));
     for (int i = 0; i < paths.size(); ++i) {
-        paths[i] = generate_gpm_path(S, r, sigma, dt, num_simulations); // Initialize all paths with the initial stock price
+        paths[i] = generate_gpm_path(S, r, sigma, dt, steps); // Fix: Pass 'steps' instead of 'num_simulations'
     }
-    return back_propagation(paths, K, r, dt, steps, is_call);
+    double v1_avg = back_propagation(paths, K, r, dt, steps, is_call);
+    // Fix: Discount the average value at t=1 back to t=0 and take max with intrinsic at t=0
+    double discount_last = std::exp(-r * dt);
+    double continuation = v1_avg * discount_last;
+    double intrinsic = is_call ? std::max(0.0, S - K) : std::max(0.0, K - S);
+    return std::max(intrinsic, continuation);
 }
 
 
