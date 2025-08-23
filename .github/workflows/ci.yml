@@ -7,7 +7,27 @@ on:
     branches: [ main ]
 
 jobs:
-  lint:
+  cpp-build:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y cmake g++ python3-dev
+
+    - name: Configure CMake
+      run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+
+    - name: Build
+      run: cmake --build build
+
+    - name: Test
+      working-directory: build
+      run: ctest --output-on-failure
+
+  python-lint:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v3
