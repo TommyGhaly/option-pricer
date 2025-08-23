@@ -29,8 +29,10 @@ PYBIND11_MODULE(option_pricer, m) {
     // Greeks functions
     m.def("delta", &delta, "Calculate Delta of the option",
           py::arg("S"), py::arg("K"), py::arg("r"), py::arg("q"), py::arg("T"), py::arg("sigma"), py::arg("is_call"));
-    m.def("gamma", &gamma, "Calculate Gamma of the option",
-          py::arg("S"), py::arg("K"), py::arg("r"), py::arg("q"), py::arg("T"), py::arg("sigma"));
+    m.def("gamma", [](double S, double K, double r, double q, double T, double sigma) {
+        return gamma(S, K, r, q, T, sigma);
+    }, "Calculate Gamma of the option",
+    py::arg("S"), py::arg("K"), py::arg("r"), py::arg("q"), py::arg("T"), py::arg("sigma"));
     m.def("theta", &theta, "Calculate Theta of the option",
           py::arg("S"), py::arg("K"), py::arg("r"), py::arg("q"), py::arg("T"), py::arg("sigma"), py::arg("is_call"));
     m.def("vega", &vega, "Calculate Vega of the option",

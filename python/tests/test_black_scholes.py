@@ -1,13 +1,13 @@
-import ctypes
+import importlib.util
 
-options = ctypes.CDLL("../../cpp/core/liboptions.so")
+# Import your module (using the method that worked)
+
+so_file = "/Users/tommyghaly/Desktop/quant_finance_journey/option_pricer/option_pricer.cpython-39-darwin.so"
+spec = importlib.util.spec_from_file_location("option_pricer", so_file)
+option_pricer = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(option_pricer)
 
 
-# Example: set argtypes and restype for black_scholes
-options.bs_option_price.argtypes = [ctypes.c_double, ctypes.c_double, ctypes.c_double,
-                                         ctypes.c_double, ctypes.c_double, ctypes.c_double, ctypes.c_int]
-options.bs_option_price.restype = ctypes.c_double
 
-# Call the function
-price = options.bs_option_price(100, 100, 0.05, 0.0, 1, 0.2, 1)
-print("Call price:", price)
+print(f'Black-Scholes Call Price: {option_pricer.black_scholes(100, 100, 0.05, 0.2, 1)}')
+print(f'Black-Scholes Put Price: {option_pricer.black_scholes(100, 100, 0.05, 0.2, 0)}')
