@@ -6,8 +6,8 @@
 #include <cstring>
 
 // Forward declarations
-std::vector<double> generate_gpm_path(double S, double r, double sigma, double dt, int steps);
-double back_propagation(std::vector<std::vector<double>>& paths, double K, double r, double dt, int steps, bool is_call);
+std::vector<double> generate_gpm_path(double S, double r, double q, double sigma, double dt, int steps);
+double back_propagation(std::vector<std::vector<double>>& paths, double K, double r, double q, double dt, int steps, bool is_call);
 std::vector<double> polynomial_regression(const std::vector<double>& X, const std::vector<double>& Y);
 
 
@@ -19,11 +19,11 @@ double generate_random_normal(double mean, double sigma) {
     return distribution(generator); // Generate a random number
 }
 
-double monte_carlo_asian_option(double S, double K, double r, double sigma, double T, int steps, int num_simulations, bool is_call){
+double monte_carlo_asian_option(double S, double K, double r, double q, double sigma, double T, int steps, int num_simulations, bool is_call){
     double price_total = 0.0;
     double sum_squares = 0.0;
     double dt = T / steps;
-    double drift = (r - sigma * sigma / 2.0) * dt;  // Risk-neutral drift
+    double drift = (r - q - sigma * sigma / 2.0) * dt;  // Risk-neutral drift adjusted for dividend yield
     double discount = std::exp(-r * T); // Discount factor for present value
     // number of simulations
     for (int i = 0; i < num_simulations; ++i){
@@ -59,13 +59,13 @@ double monte_carlo_asian_option(double S, double K, double r, double sigma, doub
 }
 
 
-double monte_carlo_american_option(double S, double K, double r, double sigma, double T, int steps, int num_simulations, bool is_call) {
+double monte_carlo_american_option(double S, double K, double r, double q, double sigma, double T, int steps, int num_simulations, bool is_call) {
     double dt = T / steps;
     std::vector<std::vector<double>> paths(num_simulations, std::vector<double>(steps + 1));
     for (int i = 0; i < paths.size(); ++i) {
-        paths[i] = generate_gpm_path(S, r, sigma, dt, steps); // Fix: Pass 'steps' instead of 'num_simulations'
+        paths[i] = generate_gpm_path(S, r, q, sigma, dt, steps); // Pass dividend yield q into path generator
     }
-    double v1_avg = back_propagation(paths, K, r, dt, steps, is_call);
+    double v1_avg = back_propagation(paths, K, r, q, dt, steps, is_call);
     // Fix: Discount the average value at t=1 back to t=0 and take max with intrinsic at t=0
     double discount_last = std::exp(-r * dt);
     double continuation = v1_avg * discount_last;
@@ -74,9 +74,9 @@ double monte_carlo_american_option(double S, double K, double r, double sigma, d
 }
 
 
-std::vector<double> generate_gpm_path(double S, double r, double sigma, double dt, int steps) {
+std::vector<double> generate_gpm_path(double S, double r, double q, double sigma, double dt, int steps) {
     double simulated_price = S;
-    double drift = (r - sigma * sigma / 2.0) * dt;  // Risk-neutral drift
+    double drift = (r - q - sigma * sigma / 2.0) * dt;  // Risk-neutral drift adjusted for dividend yield
     std::vector<double> path(steps + 1);
     path[0] = S; // Set the initial price
     for (int i = 0; i < steps; ++i) {
@@ -88,7 +88,7 @@ std::vector<double> generate_gpm_path(double S, double r, double sigma, double d
 }
 
 
-double back_propagation(std::vector<std::vector<double>>& paths, double K, double r, double dt, int steps, bool is_call) {
+double back_propagation(std::vector<std::vector<double>>& paths, double K, double r, double q, double dt, int steps, bool is_call) {
     int M = paths.size();
     std::vector<double> cashflows(M, 0.0);
 
@@ -205,16 +205,16 @@ std::vector<double> polynomial_regression(const std::vector<double>& X, const st
 
 extern "C" {
     double mc_asian_option(
-        double S, double K, double r, double sigma,
+        double S, double K, double r, double q, double sigma,
         double T, int steps, int num_simulations, int is_call
     ) {
-        return monte_carlo_asian_option(S, K, r, sigma, T, steps, num_simulations, is_call != 0);
+        return monte_carlo_asian_option(S, K, r, q, sigma, T, steps, num_simulations, is_call != 0);
     }
 
     double mc_american_option(
-        double S, double K, double r, double sigma,
+        double S, double K, double r, double q, double sigma,
         double T, int steps, int num_simulations, int is_call
     ) {
-        return monte_carlo_american_option(S, K, r, sigma, T, steps, num_simulations, is_call != 0);
+        return monte_carlo_american_option(S, K, r, q, sigma, T, steps, num_simulations, is_call != 0);
     }
 }

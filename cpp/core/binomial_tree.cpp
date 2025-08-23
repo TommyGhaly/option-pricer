@@ -3,11 +3,12 @@
 #include <cmath>
 #include <vector>
 
-double binomial_tree_euro(double S, double K, double r, double sigma, double T, int N, bool is_call) {
+double binomial_tree_euro(double S, double K, double r, double q, double sigma, double T, int N, bool is_call) {
     double dt = T / N;
     double u = std::exp(sigma * sqrt(dt));
     double d = 1.0 / u;
-    double p = (std::exp(r * dt) - d) / (u - d);
+    // risk-neutral probability adjusted for continuous dividend yield q
+    double p = (std::exp((r - q) * dt) - d) / (u - d);
     double discount = std::exp(-r * dt);
 
     // Cache powers of u and d
@@ -25,7 +26,7 @@ double binomial_tree_euro(double S, double K, double r, double sigma, double T, 
 
     // Initialize option values at maturity
     for (int i = 0; i <= N; ++i) {
-        double S_final = S * u_powers[N-i] * d_powers[i];
+    double S_final = S * u_powers[N-i] * d_powers[i];
         if (is_call) {
             optionValues[i] = std::max(0.0, S_final - K);
         } else {
@@ -43,11 +44,11 @@ double binomial_tree_euro(double S, double K, double r, double sigma, double T, 
     return optionValues[0];
 }
 
-double binomial_tree_american(double S, double K, double r, double sigma, double T, int N, bool is_call) {
+double binomial_tree_american(double S, double K, double r, double q, double sigma, double T, int N, bool is_call) {
     double dt = T / N;
     double u = std::exp(sigma * sqrt(dt));
     double d = 1.0 / u;
-    double p = (std::exp(r * dt) - d) / (u - d);
+    double p = (std::exp((r - q) * dt) - d) / (u - d);
     double discount = std::exp(-r * dt);
 
     // Cache powers of u and d
@@ -95,13 +96,13 @@ double binomial_tree_american(double S, double K, double r, double sigma, double
 }
 
 extern "C" {
-    double bt_euro(double S, double K, double r, double sigma,
+    double bt_euro(double S, double K, double r, double q, double sigma,
                    double T, int N, int is_call) {
-        return binomial_tree_euro(S, K, r, sigma, T, N, is_call != 0);
+        return binomial_tree_euro(S, K, r, q, sigma, T, N, is_call != 0);
     }
 
-    double bt_american(double S, double K, double r, double sigma,
+    double bt_american(double S, double K, double r, double q, double sigma,
                        double T, int N, int is_call) {
-        return binomial_tree_american(S, K, r, sigma, T, N, is_call != 0);
+        return binomial_tree_american(S, K, r, q, sigma, T, N, is_call != 0);
     }
 }

@@ -7,62 +7,68 @@ double phi(double x) {
     return (1.0 / sqrt( 2 * M_PI)) * std::exp(-0.5 * x * x);
 }
 
-double delta(double S, double K, double r, double T, double sigma, bool is_call) {
-    double ND_1 = N(d_1(S, K, r, T, sigma));
+double delta(double S, double K, double r, double q, double T, double sigma, bool is_call) {
+    double ND_1 = N(d_1(S, K, r, q, T, sigma));
     if (is_call) {
-        return ND_1;
+        return std::exp(-q * T) * ND_1; // adjust for continuous dividend yield
     } else {
-        return ND_1 - 1; // For put options, delta is negative of call delta
+        return std::exp(-q * T) * (ND_1 - 1);
     }
 }
 
-double gamma(double S, double K, double r, double T, double sigma) {
-    return (phi(d_1(S, K, r, T, sigma))) / (S * sigma * sqrt(T));
+double gamma(double S, double K, double r, double q, double T, double sigma) {
+    return (phi(d_1(S, K, r, q, T, sigma))) / (S * sigma * sqrt(T)) * std::exp(-q * T);
 }
 
-double theta(double S, double K, double r, double T, double sigma, bool is_call) {
-    double term1 = -(S * phi(d_1(S, K, r, T, sigma)) * sigma) / (2 * sqrt(T));
-    double term2 = r * K * exp(-r * T) * N(d_2(S, K, r, T, sigma));
+double theta(double S, double K, double r, double q, double T, double sigma, bool is_call) {
+    double d1 = d_1(S, K, r, q, T, sigma);
+    double d2 = d_2(S, K, r, q, T, sigma);
+    double term1 = -(S * std::exp(-q * T) * phi(d1) * sigma) / (2 * sqrt(T));
+    double term2_call = q * S * std::exp(-q * T) * N(d1);
+    double term2_put = q * S * std::exp(-q * T) * N(-d1);
+    double term3_call = r * K * std::exp(-r * T) * N(d2);
+    double term3_put = r * K * std::exp(-r * T) * N(-d2);
+
     if (is_call) {
-        return term1 - term2;
+        return term1 - term2_call - term3_call;
     } else {
-        return term1 + term2; // For put options, theta is adjusted by the second term
+        return term1 + term2_put + term3_put;
     }
 }
 
-double vega(double S, double K, double r, double T, double sigma) {
-    return S * phi(d_1(S, K, r, T, sigma)) * sqrt(T);
+double vega(double S, double K, double r, double q, double T, double sigma) {
+    return S * std::exp(-q * T) * phi(d_1(S, K, r, q, T, sigma)) * sqrt(T);
 }
 
 
-double rho(double S, double K, double r, double T, double sigma, bool is_call) {
-    double term = K * T * exp(-r * T);
-    double d2 = d_2(S, K, r, T, sigma);
+double rho(double S, double K, double r, double q, double T, double sigma, bool is_call) {
+    double term = K * T * std::exp(-r * T);
+    double d2 = d_2(S, K, r, q, T, sigma);
     if (is_call) {
         return term * N(d2);
     } else {
-        return -term * N(-d2); // For put options, rho is negative of call rho
+        return -term * N(-d2);
     }
 }
 
 extern "C" {
-    double delta_wrapper(double S, double K, double r, double T, double sigma, int is_call) {
-        return delta(S, K, r, T, sigma, is_call != 0);
+    double delta_wrapper(double S, double K, double r, double q, double T, double sigma, int is_call) {
+        return delta(S, K, r, q, T, sigma, is_call != 0);
     }
 
-    double gamma_wrapper(double S, double K, double r, double T, double sigma) {
-        return gamma(S, K, r, T, sigma);
+    double gamma_wrapper(double S, double K, double r, double q, double T, double sigma) {
+        return gamma(S, K, r, q, T, sigma);
     }
 
-    double theta_wrapper(double S, double K, double r, double T, double sigma, int is_call) {
-        return theta(S, K, r, T, sigma, is_call != 0);
+    double theta_wrapper(double S, double K, double r, double q, double T, double sigma, int is_call) {
+        return theta(S, K, r, q, T, sigma, is_call != 0);
     }
 
-    double vega_wrapper(double S, double K, double r, double T, double sigma) {
-        return vega(S, K, r, T, sigma);
+    double vega_wrapper(double S, double K, double r, double q, double T, double sigma) {
+        return vega(S, K, r, q, T, sigma);
     }
 
-    double rho_wrapper(double S, double K, double r, double T, double sigma, int is_call) {
-        return rho(S, K, r, T, sigma, is_call != 0);
+    double rho_wrapper(double S, double K, double r, double q, double T, double sigma, int is_call) {
+        return rho(S, K, r, q, T, sigma, is_call != 0);
     }
 }
