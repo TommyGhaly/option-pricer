@@ -5,7 +5,7 @@ add_library(core
     black_scholes.cpp
     greeks.cpp
     monte_carlo.cpp
-    binary_tree.cpp
+    binomial_tree.cpp
 )
 
 # Expose headers to anyone linking against this library

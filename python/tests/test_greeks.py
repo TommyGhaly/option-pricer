@@ -24,7 +24,7 @@ options.rho_wrapper.argtypes = [ctypes.c_double, ctypes.c_double, ctypes.c_doubl
 options.rho_wrapper.restype = ctypes.c_double
 
 
-def test_greeks():
+def test_greeks() -> None:
     S = 100.0
     K = 100.0
     T = 1.0
