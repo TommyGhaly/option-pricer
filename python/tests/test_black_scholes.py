@@ -1,6 +1,5 @@
 import ctypes
 
-
 options = ctypes.CDLL("../../cpp/core/liboptions.so")
 
 
