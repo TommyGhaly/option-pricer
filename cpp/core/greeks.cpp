@@ -50,6 +50,34 @@ double rho(double S, double K, double r, double q, double T, double sigma, bool 
         return -term * N(-d2);
     }
 }
+double vanna(double S, double K, double r, double q, double T, double sigma){
+    double d1 = d_1(S, K, r, q, T, sigma);
+    double d2 = d_2(S, K, r, q, T, sigma);
+    return -phi(d1) * std::exp(-q * T) * d2 / sigma;
+}
+double charm(double S, double K, double r, double q, double T, double sigma, bool is_call){
+    double d1 = d_1(S, K, r, q, T, sigma);
+    double d2 = d_2(S, K, r, q, T, sigma);
+    double sqrt_T = std::sqrt(T);
+
+    double common_term = phi(d1) * ((r - q) / (sigma * sqrt_T) - d2 / (2 * T));
+
+    if (is_call) {
+        return -std::exp(-q * T) * (q * N(d1) + common_term);
+    } else {
+        return -std::exp(-q * T) * (q * N(-d1) - common_term);
+    }
+}
+double vomma(double S, double K, double r, double q, double T, double sigma){
+    double d1 = d_1(S, K, r, q, T, sigma);
+    double d2 = d_2(S, K, r, q, T, sigma);
+    return S * std::exp(-q * T) * phi(d1) * sqrt(T) * d1 * d2 / sigma;
+}
+double veta(double S, double K, double r, double q, double T, double sigma){
+    double d1 = d_1(S, K, r, q, T, sigma);
+    double d2 = d_2(S, K, r, q, T, sigma);
+    return -S * std::exp(-q * T) * phi(d1) * std::sqrt(T) * (q + ((r - q) * d1) / (sigma * std::sqrt(T)) - (1 + d1 * d2) / (2 * T));
+}
 
 extern "C" {
     double delta_wrapper(double S, double K, double r, double q, double T, double sigma, int is_call) {
@@ -70,5 +98,17 @@ extern "C" {
 
     double rho_wrapper(double S, double K, double r, double q, double T, double sigma, int is_call) {
         return rho(S, K, r, q, T, sigma, is_call != 0);
+    }
+    double vanna_wrapper(double S, double K, double r, double q, double T, double sigma){
+        return vanna(S, K, r, q, T, sigma);
+    }
+    double charm_wrapper(double S, double K, double r, double q, double T, double sigma, int is_call){
+        return charm(S, K, r, q, T, sigma, is_call != 0);
+    }
+    double vomma_wrapper(double S, double K, double r, double q, double T, double sigma){
+        return vomma(S, K, r, q, T, sigma);
+    }
+    double veta_wrapper(double S, double K, double r, double q, double T, double sigma){
+        return veta(S, K, r, q, T, sigma);
     }
 }
