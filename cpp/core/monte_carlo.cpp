@@ -2,6 +2,13 @@
 #include <cmath>
 #include <random>
 #include <iostream>
+#include <vector>
+#include <cstring>
+
+// Forward declarations
+std::vector<double> generate_gpm_path(double S, double r, double sigma, double dt, int steps);
+double back_propagation(std::vector<std::vector<double>>& paths, double K, double r, double dt, int steps, bool is_call);
+std::vector<double> polynomial_regression(const std::vector<double>& X, const std::vector<double>& Y);
 
 
 double generate_random_normal(double mean, double sigma) {
@@ -18,26 +25,28 @@ double monte_carlo_asian_option(double S, double K, double r, double sigma, doub
     double dt = T / steps;
     double drift = (r - sigma * sigma / 2.0) * dt;  // Risk-neutral drift
     double discount = std::exp(-r * T); // Discount factor for present value
-    double simulated_price = S;
-
     // number of simulations
     for (int i = 0; i < num_simulations; ++i){
-        simulated_price = S; // reset start price for each simulation
+        double simulated_price = S; // reset start price for each simulation
+        double sum_path = 0.0;
         // number of steps per simulation
         for (int j = 0; j < steps; ++j) {
             double z = generate_random_normal(0, 1); // generate a standard normal random variable
             // simulate the price path using geometric Brownian motion
             simulated_price *= std::exp(drift + (sigma * sqrt(dt) * z));
+            sum_path += simulated_price;
         }
-        // accumlate the price for averaging
+        // Calculate average price along the path for Asian option
+        double avg_price = sum_path / steps;
         double payoff = 0.0;
         if (is_call) {
-            payoff = std::max(0.0, simulated_price - K);
+            payoff = std::max(0.0, avg_price - K);
         } else {
-            payoff = std::max(0.0, K - simulated_price);
+            payoff = std::max(0.0, K - avg_price);
+        }
         price_total += payoff;
         sum_squares += payoff * payoff; // accumulate squares for variance calculation
-    }
+    } // Close the simulation loop
     // Calculate standard error
     double mean = price_total / num_simulations;
     double variance = (sum_squares / num_simulations) - (mean * mean);
@@ -47,4 +56,143 @@ double monte_carlo_asian_option(double S, double K, double r, double sigma, doub
 
 
     return price; // Return the average price discounted to present value
+}
+
+
+double monte_carlo_american_option(double S, double K, double r, double sigma, double T, int steps, int num_simulations, bool is_call) {
+    double dt = T / steps;
+    std::vector<std::vector<double>> paths(num_simulations, std::vector<double>(steps + 1));
+    for (int i = 0; i < paths.size(); ++i) {
+        paths[i] = generate_gpm_path(S, r, sigma, dt, num_simulations); // Initialize all paths with the initial stock price
+    }
+    return back_propagation(paths, K, r, dt, steps, is_call);
+}
+
+
+std::vector<double> generate_gpm_path(double S, double r, double sigma, double dt, int steps) {
+    double simulated_price = S;
+    double drift = (r - sigma * sigma / 2.0) * dt;  // Risk-neutral drift
+    std::vector<double> path(steps + 1);
+    path[0] = S; // Set the initial price
+    for (int i = 0; i < steps; ++i) {
+        double z = generate_random_normal(0,1); // generate a standard normal random variable
+        simulated_price *= std::exp(drift + (sigma * sqrt(dt) * z));
+        path[i + 1] = simulated_price; // Store the simulated price at each step
+    }
+    return path;
+}
+
+
+double back_propagation(std::vector<std::vector<double>>& paths, double K, double r, double dt, int steps, bool is_call) {
+    int M = paths.size();
+    std::vector<double> cashflows(M, 0.0);
+
+    // Initialize with terminal payoffs
+    for (int i = 0; i < M; ++i) {
+        double ST = paths[i][steps];
+        cashflows[i] = is_call ? std::max(0.0, ST - K) : std::max(0.0, K - ST);
+    }
+
+    // Step backwards in time
+    for (int t = steps-1; t > 0; --t) {
+        std::vector<double> X;  // stock prices
+        std::vector<double> Y;  // discounted future cashflows
+
+        for (int i = 0; i < M; ++i) {
+            double St = paths[i][t];
+            double intrinsic = is_call ? std::max(0.0, St - K) : std::max(0.0, K - St);
+            if (intrinsic > 0) {
+                X.push_back(St);
+                Y.push_back(cashflows[i] * std::exp(-r*dt)); // discounted future payoff
+            }
+        }
+
+        // Only regress if we have enough ITM points
+        if (X.size() > 3) {
+            std::vector<double> coeffs = polynomial_regression(X, Y);
+
+            // Update decisions path by path
+            for (int i = 0; i < M; ++i) {
+                double St = paths[i][t];
+                double intrinsic = is_call ? std::max(0.0, St - K) : std::max(0.0, K - St);
+                if (intrinsic > 0) {
+                    double continuation = coeffs[0] + coeffs[1]*St + coeffs[2]*St*St;
+                    if (intrinsic >= continuation) {
+                        cashflows[i] = intrinsic; // exercise now
+                    } else {
+                        cashflows[i] = cashflows[i] * std::exp(-r*dt); // continue
+                    }
+                } else {
+                    cashflows[i] = cashflows[i] * std::exp(-r*dt); // not ITM → continue
+                }
+            }
+        } else {
+            // Fallback: just discount if not enough points for regression
+            for (int i = 0; i < M; ++i) {
+                cashflows[i] = cashflows[i] * std::exp(-r*dt);
+            }
+        }
+    }
+
+    // At time 0: average over all discounted cashflows
+    double price = 0.0;
+    for (int i = 0; i < M; ++i) price += cashflows[i];
+    return price / M;
+}
+
+// Solve linear regression: Y ≈ a0 + a1*X + a2*X^2
+std::vector<double> polynomial_regression(const std::vector<double>& X, const std::vector<double>& Y) {
+    int n = X.size();
+    if (n == 0) return {0.0, 0.0, 0.0}; // avoid division by zero
+
+    // Build sums for normal equations
+    double Sx=0, Sx2=0, Sx3=0, Sx4=0;
+    double Sy=0, Sxy=0, Sx2y=0;
+
+    for (int i = 0; i < n; ++i) {
+        double x = X[i];
+        double y = Y[i];
+        double x2 = x * x;
+
+        Sx  += x;
+        Sx2 += x2;
+        Sx3 += x2 * x;
+        Sx4 += x2 * x2;
+
+        Sy  += y;
+        Sxy += x * y;
+        Sx2y += x2 * y;
+    }
+
+    // Normal equation system: 3x3 matrix
+    // [ n,  Sx,  Sx2 ] [a0]   [ Sy  ]
+    // [Sx, Sx2,  Sx3 ] [a1] = [ Sxy ]
+    // [Sx2,Sx3,  Sx4 ] [a2]   [Sx2y]
+
+    double A[3][3] = {{(double)n, Sx, Sx2},
+                      {Sx, Sx2, Sx3},
+                      {Sx2, Sx3, Sx4}};
+    double b[3] = {Sy, Sxy, Sx2y};
+
+    // Solve 3x3 system via Cramer's rule (simple, fine for small dimension)
+    auto det3 = [](double M[3][3]) {
+        return M[0][0]*(M[1][1]*M[2][2]-M[1][2]*M[2][1])
+             - M[0][1]*(M[1][0]*M[2][2]-M[1][2]*M[2][0])
+             + M[0][2]*(M[1][0]*M[2][1]-M[1][1]*M[2][0]);
+    };
+
+    double detA = det3(A);
+    if (std::fabs(detA) < 1e-12) return {0.0, 0.0, 0.0};
+
+    double A0[3][3], A1[3][3], A2[3][3];
+    std::memcpy(A0, A, sizeof(A));
+    std::memcpy(A1, A, sizeof(A));
+    std::memcpy(A2, A, sizeof(A));
+    for (int i=0;i<3;++i) { A0[i][0]=b[i]; A1[i][1]=b[i]; A2[i][2]=b[i]; }
+
+    double a0 = det3(A0)/detA;
+    double a1 = det3(A1)/detA;
+    double a2 = det3(A2)/detA;
+
+    return {a0, a1, a2};
 }
