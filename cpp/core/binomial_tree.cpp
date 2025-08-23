@@ -94,15 +94,3 @@ double binomial_tree_american(double S, double K, double r, double q, double sig
 
     return optionValues[0];
 }
-
-extern "C" {
-    double bt_euro(double S, double K, double r, double q, double sigma,
-                   double T, int N, int is_call) {
-        return binomial_tree_euro(S, K, r, q, sigma, T, N, is_call != 0);
-    }
-
-    double bt_american(double S, double K, double r, double q, double sigma,
-                       double T, int N, int is_call) {
-        return binomial_tree_american(S, K, r, q, sigma, T, N, is_call != 0);
-    }
-}

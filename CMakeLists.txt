@@ -10,6 +10,7 @@ enable_testing()
 
 # Add subdirectories
 add_subdirectory(cpp/core)
+add_subdirectory(cpp/bindings)
 
 # Compiler warnings
 if(MSVC)
