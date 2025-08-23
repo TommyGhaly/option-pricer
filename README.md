@@ -13,8 +13,8 @@ A high-performance option pricing library combining C++ computational engine wit
   - Jump diffusion models
 
 - **Greeks Calculation**
-  - First-order: Delta, Gamma, Theta, Vega, Rho
-  - Second-order: Vanna, Charm, Vomma, Veta, Vera
+  - First-order: Delta, Theta, Vega, Rho
+  - Second-order: Vanna, Charm, Vomma, Veta, Gamma
   - Portfolio-level aggregation
 
 - **Performance**
