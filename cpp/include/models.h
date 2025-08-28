@@ -1,0 +1,6 @@
+#ifndef MODELS_H
+#define MODELS_H
+
+
+double heston_model(double S, double K, double r, double q, double T, double v0, double kappa, double theta, double sigma, double rho, double lambda, bool is_call);
+#endif // MODELS_H
