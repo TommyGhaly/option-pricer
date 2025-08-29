@@ -1,4 +1,4 @@
-#include "binomial_tree.h"
+#include "../include/option_pricer.h"
 #include <iostream>
 #include <cmath>
 #include <vector>

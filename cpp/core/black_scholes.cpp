@@ -1,4 +1,4 @@
-#include "black_scholes.h"
+#include "../include/option_pricer.h"
 #include <cmath>
 #include <iostream>
 

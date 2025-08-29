@@ -1,4 +1,4 @@
-#include "monte_carlo.h"
+#include "../include/option_pricer.h"
 #include <cmath>
 #include <random>
 #include <iostream>
