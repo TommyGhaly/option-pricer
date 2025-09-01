@@ -1,5 +1,5 @@
 #include "../include/models.h"
-#include "../core/black_scholes.h"
+#include "../include/option_pricer.h"
 #include <iostream>
 #include <cmath>
 
