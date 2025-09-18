@@ -10,4 +10,21 @@ double jump_diffusion(double S, double K, double r, double q, double sigma, doub
 double american_local_vol_fdm(double S0, double K, double r, double q, double T, double implied_vol, bool is_call,int N_S, int N_T);
 double european_local_vol_fdm(double S0, double K, double r, double q, double T, double implied_vol, bool is_call, int N_S, int N_T);
 
+double SABRImpliedVol(double F, double K, double T, double alpha, double beta, double rho, double nu);
+double SABROptionPrice(double S, double K, double r, double T, double F,
+                      double alpha, double beta, double rho, double nu, bool isCall);
+void CalibratesSABR(const double* strikes, const double* marketVols, int n,
+                   double F, double T, double fixedBeta,
+                   double& alpha, double& rho, double& nu);
+double SABRDelta(double S, double K, double r, double T, double F,
+                double alpha, double beta, double rho, double nu, bool isCall);
+double SABRGamma(double S, double K, double r, double T, double F,
+                double alpha, double beta, double rho, double nu, bool isCall);
+double SABRVega(double S, double K, double r, double T, double F,
+               double alpha, double beta, double rho, double nu, bool isCall);
+double SABRVolga(double S, double K, double r, double T, double F,
+                double alpha, double beta, double rho, double nu);
+double SABRVanna(double S, double K, double r, double T, double F,
+                double alpha, double beta, double rho, double nu);
+
 #endif // MODELS_H
