@@ -1,4 +1,5 @@
 #include "../include/option_pricer.h"
+#include "../include/utils.h"
 #include <cmath>
 #include <random>
 #include <iostream>

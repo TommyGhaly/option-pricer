@@ -9,9 +9,13 @@ ext_modules = [
             "cpp/core/greeks.cpp",               # Add all implementation files
             "cpp/core/black_scholes.cpp",
             "cpp/core/binomial_tree.cpp",
-            "cpp/core/monte_carlo.cpp"
+            "cpp/core/monte_carlo.cpp",
+            "cpp/models/heston_model.cpp",
+            "cpp/models/sabr_model.cpp",
+            "cpp/models/local_vol_model.cpp",
+            "cpp/models/jump_diffusion.cpp",
         ],  # Adjust path to your binding file
-        include_dirs=["./cpp/core"],  # Path to your header files
+        include_dirs=["./cpp/include"],  # Path to your header files
         cxx_std=11,
     ),
 ]

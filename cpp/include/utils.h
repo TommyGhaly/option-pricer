@@ -1,0 +1,12 @@
+#ifndef UTILS_H
+#define UTILS_H
+#include <vector>
+
+// Helper functions
+double generate_random_normal(double mean, double sigma);
+std::vector<double> generate_gpm_path(double S, double r, double q, double sigma, double dt, int steps);
+double back_propagation(std::vector<std::vector<double>>& paths, double K, double r, double q, double dt, int steps, bool is_call);
+std::vector<double> polynomial_regression(const std::vector<double>& X, const std::vector<double>& Y);
+
+
+#endif
