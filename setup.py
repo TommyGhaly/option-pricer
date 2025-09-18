@@ -10,9 +10,9 @@ ext_modules = [
             "cpp/core/black_scholes.cpp",
             "cpp/core/binomial_tree.cpp",
             "cpp/core/monte_carlo.cpp",
-            "cpp/models/heston_model.cpp",
-            "cpp/models/sabr_model.cpp",
-            "cpp/models/local_vol_model.cpp",
+            "cpp/models/heston.cpp",
+            "cpp/models/sabr.cpp",
+            "cpp/models/local_volatility.cpp",
             "cpp/models/jump_diffusion.cpp",
         ],  # Adjust path to your binding file
         include_dirs=["./cpp/include"],  # Path to your header files
