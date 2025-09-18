@@ -7,62 +7,83 @@
 #include <functional>
 
 /**
- * Computes the risk-neutral probability P1 or P2 for the Heston model
- * using numerical integration (Simpson's rule)
- *
- * @param num: 1 for P1, 2 for P2
- * @param N: Number of integration points (higher = more accurate)
- * @param L: Not used in this implementation (was for COS method truncation)
- * @return: Probability value in [0,1]
+ * Returns u_j coefficients
+ * u_1 = 0.5 (for P1)
+ * u_2 = -0.5 (for P2)
  */
-double p(int num, double lambda, double kappa, double rho,
-         double sigma, double theta, double r,
-         double q, double S, double T,
-         double v0, double K, int N, double L) {
+double u(int num) {
+    if (num == 1) {
+        return 0.5;
+    } else {
+        return -0.5;
+    }
+}
+
+/**
+ * Computes b_j coefficients
+ * b_1 = κ + λ - ρσ (for P1)
+ * b_2 = κ + λ (for P2)
+ */
+double b(int num, double lambda, double kappa,
+         double rho, double sigma) {
+    if (num == 1) {
+        return kappa + lambda - (sigma * rho);
+    } else {
+        return kappa + lambda;
+    }
+}
+
+/**
+ * Computes d_j = sqrt[(ρσφi - b_j)² - σ²(2u_jφi - φ²)]
+ * This is the discriminant in the Heston characteristic function
+ */
+std::complex<double> d(int num, double lambda, double kappa,
+                       double rho, double sigma, double phi) {
     std::complex<double> i(0.0, 1.0);
 
-    // This implements the integral: P_j = 0.5 + (1/π) ∫ Re[e^(-iφln(K)) * f_j(φ) / (iφ)] dφ
+    double b_val = b(num, lambda, kappa, rho, sigma);
+    double u_val = u(num);
 
-    double integral = 0.0;
-    double phi_min = 1e-8;  // Avoid singularity at φ = 0
-    double phi_max = 100.0; // Upper limit for integration
+    // Calculate the expression under the square root
+    std::complex<double> term1 = rho * sigma * phi * i - b_val;
+    std::complex<double> discriminant = term1 * term1 -
+                                       sigma * sigma * (2.0 * u_val * phi * i - phi * phi);
 
-    // Simpson's rule setup
-    double h = (phi_max - phi_min) / (N - 1);
+    // Take square root with correct branch
+    std::complex<double> result = std::sqrt(discriminant);
 
-    // Ensure N is odd for Simpson's rule
-    if (N % 2 == 0) N++;
-
-    for (int k = 0; k < N; ++k) {
-        double phi = phi_min + k * h;
-
-        // Get characteristic function f_j(φ)
-        std::complex<double> char_func = f(num, lambda, kappa, rho, sigma,
-                                          theta, r, q, S, phi, T, v0);
-
-        // Compute integrand: e^(-iφln(K)) * f(φ) / (iφ)
-        std::complex<double> numerator = std::exp(-i * phi * std::log(K)) * char_func;
-        std::complex<double> denominator = i * phi;
-        std::complex<double> integrand_val = numerator / denominator;
-
-        // Simpson's rule weights: 1, 4, 2, 4, 2, ..., 4, 1
-        double weight;
-        if (k == 0 || k == N-1) {
-            weight = h / 3.0;
-        } else if (k % 2 == 1) {
-            weight = 4.0 * h / 3.0;
-        } else {
-            weight = 2.0 * h / 3.0;
-        }
-
-        integral += weight * integrand_val.real();
+    // Ensure we choose the branch with positive real part for stability
+    if (result.real() < 0) {
+        result = -result;
     }
 
-    // Final probability: P_j = 0.5 + integral/π
-    double probability = 0.5 + integral / M_PI;
+    return result;
+}
 
-    // Ensure probability is in valid range [0,1]
-    return std::max(0.0, std::min(1.0, probability));
+/**
+ * Computes g_j = (b_j - ρσφi + d_j) / (b_j - ρσφi - d_j)
+ * This ratio appears in the Heston characteristic function
+ */
+std::complex<double> g(int num, double lambda, double kappa,
+                       double rho, double sigma, double phi) {
+    std::complex<double> i(0.0, 1.0);
+
+    double b_val = b(num, lambda, kappa, rho, sigma);
+    std::complex<double> d_val = d(num, lambda, kappa, rho, sigma, phi);
+
+    // Calculate numerator and denominator
+    std::complex<double> base = b_val - rho * sigma * phi * i;
+    std::complex<double> numerator = base + d_val;
+    std::complex<double> denominator = base - d_val;
+
+    // Check for potential division by zero
+    if (std::abs(denominator) < 1e-12) {
+        // Handle near-zero denominator case
+        // When denominator ≈ 0, g ≈ -1 (from L'Hopital's rule)
+        return std::complex<double>(-1.0, 0.0);
+    }
+
+    return numerator / denominator;
 }
 
 /**
@@ -135,86 +156,6 @@ std::complex<double> c_function(int num, double lambda, double kappa,
 }
 
 /**
- * Computes d_j = sqrt[(ρσφi - b_j)² - σ²(2u_jφi - φ²)]
- * This is the discriminant in the Heston characteristic function
- */
-std::complex<double> d(int num, double lambda, double kappa,
-                       double rho, double sigma, double phi) {
-    std::complex<double> i(0.0, 1.0);
-
-    double b_val = b(num, lambda, kappa, rho, sigma);
-    double u_val = u(num);
-
-    // Calculate the expression under the square root
-    std::complex<double> term1 = rho * sigma * phi * i - b_val;
-    std::complex<double> discriminant = term1 * term1 -
-                                       sigma * sigma * (2.0 * u_val * phi * i - phi * phi);
-
-    // Take square root with correct branch
-    std::complex<double> result = std::sqrt(discriminant);
-
-    // Ensure we choose the branch with positive real part for stability
-    if (result.real() < 0) {
-        result = -result;
-    }
-
-    return result;
-}
-
-/**
- * Computes g_j = (b_j - ρσφi + d_j) / (b_j - ρσφi - d_j)
- * This ratio appears in the Heston characteristic function
- */
-std::complex<double> g(int num, double lambda, double kappa,
-                       double rho, double sigma, double phi) {
-    std::complex<double> i(0.0, 1.0);
-
-    double b_val = b(num, lambda, kappa, rho, sigma);
-    std::complex<double> d_val = d(num, lambda, kappa, rho, sigma, phi);
-
-    // Calculate numerator and denominator
-    std::complex<double> base = b_val - rho * sigma * phi * i;
-    std::complex<double> numerator = base + d_val;
-    std::complex<double> denominator = base - d_val;
-
-    // Check for potential division by zero
-    if (std::abs(denominator) < 1e-12) {
-        // Handle near-zero denominator case
-        // When denominator ≈ 0, g ≈ -1 (from L'Hopital's rule)
-        return std::complex<double>(-1.0, 0.0);
-    }
-
-    return numerator / denominator;
-}
-
-/**
- * Computes b_j coefficients
- * b_1 = κ + λ - ρσ (for P1)
- * b_2 = κ + λ (for P2)
- */
-double b(int num, double lambda, double kappa,
-         double rho, double sigma) {
-    if (num == 1) {
-        return kappa + lambda - (sigma * rho);
-    } else {
-        return kappa + lambda;
-    }
-}
-
-/**
- * Returns u_j coefficients
- * u_1 = 0.5 (for P1)
- * u_2 = -0.5 (for P2)
- */
-double u(int num) {
-    if (num == 1) {
-        return 0.5;
-    } else {
-        return -0.5;
-    }
-}
-
-/**
  * Computes the Heston characteristic function f_j(φ)
  * f_j(φ) = exp(C_j + D_j*V_0 + iφ*ln(S))
  */
@@ -242,6 +183,65 @@ std::complex<double> f(int num, double lambda, double kappa,
     }
 
     return std::exp(exponent);
+}
+
+/**
+ * Computes the risk-neutral probability P1 or P2 for the Heston model
+ * using numerical integration (Simpson's rule)
+ *
+ * @param num: 1 for P1, 2 for P2
+ * @param N: Number of integration points (higher = more accurate)
+ * @param L: Not used in this implementation (was for COS method truncation)
+ * @return: Probability value in [0,1]
+ */
+double p(int num, double lambda, double kappa, double rho,
+         double sigma, double theta, double r,
+         double q, double S, double T,
+         double v0, double K, int N, double L) {
+    std::complex<double> i(0.0, 1.0);
+
+    // This implements the integral: P_j = 0.5 + (1/π) ∫ Re[e^(-iφln(K)) * f_j(φ) / (iφ)] dφ
+
+    double integral = 0.0;
+    double phi_min = 1e-8;  // Avoid singularity at φ = 0
+    double phi_max = 100.0; // Upper limit for integration
+
+    // Simpson's rule setup
+    double h = (phi_max - phi_min) / (N - 1);
+
+    // Ensure N is odd for Simpson's rule
+    if (N % 2 == 0) N++;
+
+    for (int k = 0; k < N; ++k) {
+        double phi = phi_min + k * h;
+
+        // Get characteristic function f_j(φ)
+        std::complex<double> char_func = f(num, lambda, kappa, rho, sigma,
+                                          theta, r, q, S, phi, T, v0);
+
+        // Compute integrand: e^(-iφln(K)) * f(φ) / (iφ)
+        std::complex<double> numerator = std::exp(-i * phi * std::log(K)) * char_func;
+        std::complex<double> denominator = i * phi;
+        std::complex<double> integrand_val = numerator / denominator;
+
+        // Simpson's rule weights: 1, 4, 2, 4, 2, ..., 4, 1
+        double weight;
+        if (k == 0 || k == N-1) {
+            weight = h / 3.0;
+        } else if (k % 2 == 1) {
+            weight = 4.0 * h / 3.0;
+        } else {
+            weight = 2.0 * h / 3.0;
+        }
+
+        integral += weight * integrand_val.real();
+    }
+
+    // Final probability: P_j = 0.5 + integral/π
+    double probability = 0.5 + integral / M_PI;
+
+    // Ensure probability is in valid range [0,1]
+    return std::max(0.0, std::min(1.0, probability));
 }
 
 /**
