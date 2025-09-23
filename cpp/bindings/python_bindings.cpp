@@ -48,7 +48,7 @@ PYBIND11_MODULE(option_pricer, m) {
     m.def("veta", &veta, "Calculate Veta of the option",
           py::arg("S"), py::arg("K"), py::arg("r"), py::arg("q"), py::arg("T"), py::arg("sigma"));
 
-    // Heston Model function - corrected signature
+    // Heston Model function
     m.def("heston_model", &heston_model, "Price option using Heston model",
           py::arg("S"), py::arg("K"), py::arg("r"), py::arg("q"), py::arg("T"),
           py::arg("v0"), py::arg("kappa"), py::arg("theta"), py::arg("sigma"),
