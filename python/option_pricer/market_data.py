@@ -48,14 +48,19 @@ HISTORY = 100 * 60 * 60 # 1 Hour intervals or on demand
 
 class MarketDataService:
 
+
+    # Core Methods
+
     # Initialize with list of symbols and optional config
     def __init__(self, symbols, config = None):
-        self.market_data = {}
+        # Data Storage variables
         self.symbols = symbols
         self.spot_data = {}
         self.option_chain = {}
         self.historical_data = {}
         self.last_fetched = {}
+
+        #Threading control variables
         self.running = False
         self.data_lock = th.Lock()
         self.spot_thread = th.Thread(target=self.update_spot_data)
@@ -71,8 +76,25 @@ class MarketDataService:
     - Sets running flag to True
     - Returns when service is ready
     """
-    def start(self):
-        self.running = True
+    def start(self) -> bool:
+        try:
+            self.running = True
+            self._initial_data_load()
+
+            # Create and start spot price update thread
+            self.spot_thread = th.Thread(
+                target=self._spot_price_loop,
+                name="SpotPriceUpdater",
+                daemon=True  # Dies when main program exits
+            )
+            self.spot_thread.start()
+            return True
+
+        except Exception as e:
+            print(f"Failed to start market data service: {e}")
+            self.running = False
+            return False
+
 
 
     """
@@ -85,6 +107,8 @@ class MarketDataService:
         self.running = False
 
 
+    # Data Collection Methods
+
     """
     - One-time bulk fetch of spot prices for all symbols
     - Populates all data structures
@@ -93,7 +117,37 @@ class MarketDataService:
     - Provides immediate data availability
     """
     def _initial_data_load(self):
-        pass
+        for symbol in self.symbols:
+            ticker = yf.Ticker(symbol)
+            self.spot_data[symbol] = {
+                # Core Pricing Data
+                'price': ticker.info.get('regularMarketPrice', None),
+                'bid': ticker.info.get('bid', None),
+                'ask': ticker.info.get('ask', None),
+                'mid': (ticker.info.get('bid', 0) + ticker.info.get('ask', 0)) / 2 if ticker.info.get('bid') and ticker.info.get('ask') else None,
+
+                # Volume and Size
+                'volume': ticker.info.get('volume', None),
+                'bid_size': ticker.info.get('bidSize', None),
+                'ask_size': ticker.info.get('askSize', None),
+                'avg_volume': ticker.info.get('averageVolume', None),
+
+                # Price Movements
+                'open': ticker.info.get('open', None),
+                'high': ticker.info.get('dayHigh', None),
+                'low': ticker.info.get('dayLow', None),
+                'prev_close': ticker.info.get('previousClose', None),
+                'change': ticker.info.get('regularMarketChange', None),
+                'change_pct': ticker.info.get('regularMarketChangePercent', None),
+
+                # Timestamps
+                'timestamp': dt.datetime.now().timestamp(),
+                'market_time': ticker.info.get('regularMarketTime', None),
+                'quote_type': ticker.info.get('quoteType', None),
+
+                # Additional Info
+
+            }
 
 
     """
@@ -126,6 +180,8 @@ class MarketDataService:
         pass
 
 
+    # Update Loops Methods
+
     """
     - Main spot price update loop
     - Runs every 5 seconds
@@ -156,6 +212,8 @@ class MarketDataService:
     def _historical_data_loop(self):
         pass
 
+
+    # Data Processing Methods
 
     """
     - Converts DataFrame to dict format
@@ -190,6 +248,8 @@ class MarketDataService:
 
 
 
+    # Data Access Methods (Public Interface)
+
     """
     - Returns current spot price data
     - Thread-safe with lock
@@ -207,3 +267,154 @@ class MarketDataService:
     - Returns None if not available
     - Includes all strikes
     """
+    def get_option_chain(self, symbol):
+        pass
+
+
+    """
+    - Lists all expiries for symbol
+    - Used by consumers to know options
+    - Returns sorted list
+    - Empty list if no options
+    """
+    def get_available_expiries(self, symbol):
+        pass
+
+
+    """"
+    - Returns specific option contract data
+    - Convenience method for single contract
+    - Returns None if not found
+    - Type is 'call' or 'put'
+    """
+    def get_option_contract(self, symbol, strike, expiry, option_type):
+        pass
+
+
+
+    """
+    - Returns seconds since last update
+    - Helps consumers check freshness
+    - Returns None if never updated
+    - Used for staleness detection
+    """
+    def get_data_age(self, symbol, data_type):
+        pass
+
+
+
+    """
+    - Checks if market is currently open
+    - Adjusts update behavior
+    - Considers holidays
+    - Returns boolean
+    """
+    def is_market_open(self):
+        pass
+
+
+    # Utility Methods
+
+    """
+    - Checks if symbol is valid
+    - Adds to monitoring list if new
+    - Handles symbol changes
+    - Returns validation status
+    """
+    def _validate_symbol(self, symbol):
+        pass
+
+
+    """
+    - Determines update urgency
+    - Based on staleness and importance
+    - Returns priority score
+    - Used for queue ordering
+    """
+    def _calculate_update_priority(self, symbol, data_type):
+        pass
+
+
+
+    """
+    - Removes very old data
+    - Manages memory usage
+    - Runs periodically
+    - Configurable retention
+    """
+    def _clean_stale_data(self):
+        pass
+
+
+
+    """
+    - Centralized error handling
+    - Logs errors appropriately
+    - Implements retry logic
+    - Prevents service disruption
+    """
+    def _handle_api_error(self, error, context):
+        pass
+
+
+    # Configuration Mehtods
+
+    """
+    - Adjusts update intervals
+    - Allows runtime tuning
+    - Validates inputs
+    - Updates internal config
+    """
+    def set_update_frequency(self, data_type, seconds):
+        pass
+
+
+    """
+    - Adds new symbol to monitoring
+    - Initializes data structures
+    - Queues for immediate fetch
+    - Thread-safe operation
+    """
+    def add_symbol(self, symbol):
+        pass
+
+
+    """
+    - Stops monitoring symbol
+    - Cleans up data
+    - Removes from queues
+    - Frees memory
+    """
+    def remove_symbol(self, symbol):
+        pass
+
+
+# Helper Functions
+
+"""
+- Returns default configuration dict
+- Defines update frequencies
+- Sets queue sizes
+- Configurable defaults
+"""
+def create_default_config():
+    pass
+
+
+"""
+- Checks if market is open
+- Considers timezone
+- Handles holidays
+- Returns boolean
+"""
+def validate_market_hours():
+    pass
+
+"""
+- Determines update priority
+- Combines multiple factors
+- Returns numeric score
+- Used for intelligent scheduling
+"""
+def calculate_priority_score(symbol, staleness, volatility):
+    pass
