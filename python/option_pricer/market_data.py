@@ -2,6 +2,9 @@ import yfinance as yf
 import datetime as dt
 import threading as th
 from queue import Queue as qu
+import requests
+import json
+
 
 #service architecture for fetching and storing market data accessible across modules but not directly dependent on other modules
 
@@ -63,7 +66,7 @@ class MarketDataService:
         #Threading control variables
         self.running = False
         self.data_lock = th.Lock()
-        self.spot_thread = th.Thread(target=self.update_spot_data)
+        self.spot_thread = th.Thread(target=self.update_spot_data, name="SpotPriceUpdater", daemon=True)
         self.option_threads = []
         self.option_update_queue = qu()
         self.update_frequency = {'spot': SPOTS, 'atm_options': ATMS, 'otm_options': OTM, 'history': HISTORY}
@@ -117,37 +120,29 @@ class MarketDataService:
     - Provides immediate data availability
     """
     def _initial_data_load(self):
+        counter = 0
+        self.spot_data = self._batch_fetch_spots(self.symbols)
         for symbol in self.symbols:
-            ticker = yf.Ticker(symbol)
-            self.spot_data[symbol] = {
-                # Core Pricing Data
-                'price': ticker.info.get('regularMarketPrice', None),
-                'bid': ticker.info.get('bid', None),
-                'ask': ticker.info.get('ask', None),
-                'mid': (ticker.info.get('bid', 0) + ticker.info.get('ask', 0)) / 2 if ticker.info.get('bid') and ticker.info.get('ask') else None,
 
-                # Volume and Size
-                'volume': ticker.info.get('volume', None),
-                'bid_size': ticker.info.get('bidSize', None),
-                'ask_size': ticker.info.get('askSize', None),
-                'avg_volume': ticker.info.get('averageVolume', None),
+            try:
+                for option_expiry in yf.Ticker(symbol).options:
+                    if self.spot_data.get(symbol) and self.spot_data[symbol].get('price'):
+                        self.option_update_queue.put((symbol, option_expiry))
 
-                # Price Movements
-                'open': ticker.info.get('open', None),
-                'high': ticker.info.get('dayHigh', None),
-                'low': ticker.info.get('dayLow', None),
-                'prev_close': ticker.info.get('previousClose', None),
-                'change': ticker.info.get('regularMarketChange', None),
-                'change_pct': ticker.info.get('regularMarketChangePercent', None),
 
-                # Timestamps
-                'timestamp': dt.datetime.now().timestamp(),
-                'market_time': ticker.info.get('regularMarketTime', None),
-                'quote_type': ticker.info.get('quoteType', None),
+                if counter < 10:
+                    t = th.Thread(
+                        target=self._option_chain_loop,
+                        name=f"OptionChainUpdater-{counter}",
+                        daemon=True  # Dies when main program exits
+                    )
+                    t.start()
+                    self.option_threads.append(t)
+                    counter += 1
 
-                # Additional Info
+            except Exception as e:
+                print(f"Error initializing options queue {symbol}: {e}")
 
-            }
 
 
     """
@@ -157,7 +152,66 @@ class MarketDataService:
     - Single symbol fetch
     """
     def _fetch_spot_price(self, symbol):
-        pass
+        try:
+            ticker = yf.Ticker(symbol)
+            ticker_data = {
+                        # Core Pricing Data
+                        'price': ticker.info.get('regularMarketPrice', None),
+                        'bid': ticker.info.get('bid', None),
+                        'ask': ticker.info.get('ask', None),
+                        'mid': (ticker.info.get('bid', 0) + ticker.info.get('ask', 0)) / 2 if ticker.info.get('bid') and ticker.info.get('ask') else None,
+
+                        # Volume and Size
+                        'volume': ticker.info.get('volume', None),
+                        'bid_size': ticker.info.get('bidSize', None),
+                        'ask_size': ticker.info.get('askSize', None),
+                        'avg_volume': ticker.info.get('averageVolume', None),
+
+                        # Price Movements
+                        'open': ticker.info.get('open', None),
+                        'high': ticker.info.get('dayHigh', None),
+                        'low': ticker.info.get('dayLow', None),
+                        'prev_close': ticker.info.get('previousClose', None),
+                        'change': ticker.info.get('regularMarketChange', None),
+                        'change_pct': ticker.info.get('regularMarketChangePercent', None),
+
+                        # Timestamps
+                        'timestamp': dt.datetime.now().timestamp(),
+                        'market_time': ticker.info.get('regularMarketTime', None),
+                        'quote_type': ticker.info.get('quoteType', None),
+
+                        # Additional Info
+                        'halted': ticker.info.get('halted', None),
+                        'currency': ticker.info.get('currency', None),
+                        'extchange': ticker.info.get('exchange', None),
+                    }
+        except Exception as e:
+            print(f"Error fetching spot price for {symbol}: {e}")
+            ticker_data = {
+                        'price': None,
+                        'bid': None,
+                        'ask': None,
+                        'mid': None,
+                        'volume': None,
+                        'bid_size': None,
+                        'ask_size': None,
+                        'avg_volume': None,
+                        'open': None,
+                        'high': None,
+                        'low': None,
+                        'prev_close': None,
+                        'change': None,
+                        'change_pct': None,
+                        'timestamp': None,
+                        'market_time': None,
+                        'quote_type': None,
+                        'options': [],
+                        'halted': None,
+                        'currency': None,
+                        'extchange': None,
+                    }
+        return ticker_data
+
 
 
     """
@@ -177,7 +231,59 @@ class MarketDataService:
     - Returns dict of results
     """
     def _batch_fetch_spots(self, symbol_list):
-        pass
+        quotes = {}
+        if not symbol_list:
+            return quotes
+
+        url = f"https://query1.finance.yahoo.com/v7/finance/quote?symbols={','.join(symbol_list)}"
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+
+        try:
+            response = requests.get(url, headers=headers)
+            data = response.json()
+
+            for quote in data.get('quoteResponse', {}).get('result', []):
+                symbol = quote.get('symbol')
+                quotes[symbol] = {
+                    # Core Pricing Data
+                    'price': quote.get('regularMarketPrice'),
+                    'bid': quote.get('bid'),
+                    'ask': quote.get('ask'),
+                    'mid': (quote.get('bid', 0) + quote.get('ask', 0)) / 2 if quote.get('bid') is not None and quote.get('ask') is not None else None,
+
+                    # Volume and Size
+                    'volume': quote.get('regularMarketVolume'),
+                    'bid_size': quote.get('bidSize'),
+                    'ask_size': quote.get('askSize'),
+                    'avg_volume': quote.get('averageDailyVolume3Month'),
+
+                    # Price Movements
+                    'open': quote.get('regularMarketOpen'),
+                    'high': quote.get('regularMarketDayHigh'),
+                    'low': quote.get('regularMarketDayLow'),
+                    'prev_close': quote.get('regularMarketPreviousClose'),
+                    'change': quote.get('regularMarketChange'),
+                    'change_pct': quote.get('regularMarketChangePercent'),
+
+                    # Timestamps
+                    'timestamp': dt.datetime.now().timestamp(),
+                    'market_time': quote.get('regularMarketTime'),
+                    'quote_type': quote.get('quoteType'),
+
+                    # Additional Info
+                    'halted': quote.get('halted'),
+                    'currency': quote.get('currency'),
+                    'extchange': quote.get('exchange')
+                }
+
+        except Exception as e:
+            print(f"Error fetching batch quotes: {e}")
+            # fallback: return empty dict
+            return {}
+
+        return quotes
 
 
     # Update Loops Methods
