@@ -4,7 +4,7 @@ import threading as th
 from queue import Queue as qu
 import requests
 import json
-
+import time
 
 #service architecture for fetching and storing market data accessible across modules but not directly dependent on other modules
 
@@ -66,7 +66,7 @@ class MarketDataService:
         #Threading control variables
         self.running = False
         self.data_lock = th.Lock()
-        self.spot_thread = th.Thread(target=self.update_spot_data, name="SpotPriceUpdater", daemon=True)
+        self.spot_thread = th.Thread()
         self.option_threads = []
         self.option_update_queue = qu()
         self.update_frequency = {'spot': SPOTS, 'atm_options': ATMS, 'otm_options': OTM, 'history': HISTORY}
@@ -295,7 +295,28 @@ class MarketDataService:
     - Triggers option updates if needed
     """
     def _spot_price_loop(self):
-        pass
+        while self.running:
+            try:
+                # Update all symbols in batch (fast)
+                batch_data = self._batch_fetch_spots(self.symbols)
+                with self.data_lock:
+                    for symbol, data in batch_data.items():
+                        self.spot_data[symbol].update(data)
+
+                # Update priority symbols individually (full details)
+                for symbol in self.priority_symbols:
+                    try:
+                        detailed_data = self._fetch_spot_price(symbol)
+                        with self.data_lock:
+                            self.spot_data[symbol].update(detailed_data)
+                    except Exception as e:
+                        print(f"Error updating priority symbol {symbol}: {e}")
+
+            except Exception as e:
+                print(f"Error in spot price loop: {e}")
+
+            time.sleep(self.update_frequency['spot'])
+
 
 
     """
