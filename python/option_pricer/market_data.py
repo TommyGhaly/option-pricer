@@ -5,6 +5,12 @@ from queue import Queue as qu
 import requests
 import json
 import time
+import pytz
+import pandas_market_calendars as mcal
+import logging
+import time
+import traceback
+from typing import Optional, Dict, Any
 
 #service architecture for fetching and storing market data accessible across modules but not directly dependent on other modules
 
@@ -94,7 +100,10 @@ class MarketDataService:
             return True
 
         except Exception as e:
-            print(f"Failed to start market data service: {e}")
+            self._handle_api_error(e, {'operation': 'start',
+                                       'retry_count': 0,
+                                       'max_retries': 3,
+                                       'retry_delay': 1})
             self.running = False
             return False
 
@@ -141,7 +150,11 @@ class MarketDataService:
                     counter += 1
 
             except Exception as e:
-                print(f"Error initializing options queue {symbol}: {e}")
+                self._handle_api_error(e, {'operation': '_initial_data_load',
+                                           'symbol': symbol,
+                                           'retry_count': 0,
+                                           'max_retries': 3,
+                                           'retry_delay': 1})
 
 
 
@@ -186,30 +199,11 @@ class MarketDataService:
                         'extchange': ticker.info.get('exchange', None),
                     }
         except Exception as e:
-            print(f"Error fetching spot price for {symbol}: {e}")
-            ticker_data = {
-                        'price': None,
-                        'bid': None,
-                        'ask': None,
-                        'mid': None,
-                        'volume': None,
-                        'bid_size': None,
-                        'ask_size': None,
-                        'avg_volume': None,
-                        'open': None,
-                        'high': None,
-                        'low': None,
-                        'prev_close': None,
-                        'change': None,
-                        'change_pct': None,
-                        'timestamp': None,
-                        'market_time': None,
-                        'quote_type': None,
-                        'options': [],
-                        'halted': None,
-                        'currency': None,
-                        'extchange': None,
-                    }
+            self._handle_api_error(e, {'operation': '_fetch_spot_price',
+                                       'symbol': symbol,
+                                       'retry_count': 0,
+                                       'max_retries': 3,
+                                       'retry_delay': 1})
         return ticker_data
 
 
@@ -220,8 +214,25 @@ class MarketDataService:
     - Handles missing strikes
     - Validates data quality
     """
-    def _fetch_option_chain(self, symbol):
-        pass
+    def _fetch_option_chain(self, symbol, expiry):
+        try:
+            option = yf.Ticker(symbol).option_chain(expiry)
+            options_data = {
+                'calls': option.calls.to_dict(orient='records'),
+                'puts': option.puts.to_dict(orient='records'),
+                'last_updated': dt.datetime.now().timestamp()
+            }
+            return options_data
+        except Exception as e:
+            self._handle_api_error(e, {'operation': '_fetch_option_chain',
+                                       'symbol': symbol,
+                                       'expiry': expiry,
+                                       'retry_count': 0,
+                                       'max_retries': 3,
+                                       'retry_delay': 1})
+            return {'calls': [], 'puts': [], 'last_updated': None}
+
+
 
 
     """
@@ -279,7 +290,11 @@ class MarketDataService:
                 }
 
         except Exception as e:
-            print(f"Error fetching batch quotes: {e}")
+            self._handle_api_error(e, {'operation': '_batch_fetch_spots',
+                                       'symbol': ','.join(symbol_list),
+                                       'retry_count': 0,
+                                       'max_retries': 3,
+                                       'retry_delay': 1})
             # fallback: return empty dict
             return {}
 
@@ -302,6 +317,7 @@ class MarketDataService:
                 with self.data_lock:
                     for symbol, data in batch_data.items():
                         self.spot_data[symbol].update(data)
+                        self.last_fetched["spot"][symbol] = dt.datetime.now().timestamp()
 
                 # Update priority symbols individually (full details)
                 for symbol in self.priority_symbols:
@@ -309,11 +325,19 @@ class MarketDataService:
                         detailed_data = self._fetch_spot_price(symbol)
                         with self.data_lock:
                             self.spot_data[symbol].update(detailed_data)
+                            self.last_fetched["spot"][symbol] = dt.datetime.now().timestamp()
                     except Exception as e:
-                        print(f"Error updating priority symbol {symbol}: {e}")
+                        self._handle_api_error(e, {'operation': '_spot_price_loop',
+                                                   'symbol': symbol,
+                                                   'retry_count': 0,
+                                                   'max_retries': 3,
+                                                   'retry_delay': 1})
 
             except Exception as e:
-                print(f"Error in spot price loop: {e}")
+                self._handle_api_error(e, {'operation': '_spot_price_loop',
+                                           'retry_count': 0,
+                                           'max_retries': 3,
+                                           'retry_delay': 1})
 
             time.sleep(self.update_frequency['spot'])
 
@@ -327,7 +351,41 @@ class MarketDataService:
     - Multiple instances run in parallel
     """
     def _option_chain_loop(self):
-        pass
+        while self.running:
+            try:
+                symbol, expiry = self.option_update_queue.get(timeout=5)
+
+                now = time.time()
+                last_update = self.last_fetched['option'].get((symbol, expiry), 0)
+
+                # Pick right interval (ATM vs OTM)
+                interval = self.update_frequency['atm_options'] if expiry == 'nearest' else self.update_frequency['otm_options']
+
+                if now - last_update >= interval:
+                    # Fetch option chain
+                    chain_data = self._fetch_option_chain(symbol, expiry)
+                    with self.data_lock:
+                        if symbol not in self.option_chain:
+                            self.option_chain[symbol] = {}
+                        self.option_chain[symbol][expiry] = chain_data
+
+                    # Update timestamp
+                    self.last_fetched['option'][(symbol, expiry)] = now
+
+                # Always requeue for future updates
+                self.option_update_queue.put((symbol, expiry))
+                self.option_update_queue.task_done()
+
+            except qu.Empty:
+                continue
+            except Exception as e:
+                self._handle_api_error(e, {'operation': '_option_chain_loop',
+                                        'symbol': symbol,
+                                        'expiry': expiry,
+                                        'retry_count': 0,
+                                        'max_retries': 3,
+                                        'retry_delay': 1})
+
 
 
     """
@@ -405,7 +463,15 @@ class MarketDataService:
     - Empty list if no options
     """
     def get_available_expiries(self, symbol):
-        pass
+        ticker = yf.Ticker(symbol)
+        try:
+            return sorted(ticker.options)
+        except Exception as e:
+            self._handle_api_error(e, {'operation': 'get_available_expiries',
+                                       'symbol': symbol,
+                                       'retry_count': 0,
+                                       'max_retries': 3,
+                                       'retry_delay': 1})
 
 
     """"
@@ -481,39 +547,56 @@ class MarketDataService:
     - Prevents service disruption
     """
     def _handle_api_error(self, error, context):
-        pass
+            operation = context.get('operation', 'Unknown operation')
+            symbol = context.get('symbol', 'N/A')
+            retry_count = context.get('retry_count', 0)
+            max_retries = context.get('max_retries', 3)
+            retry_delay = context.get('retry_delay', 1)
 
+            # Log the error
+            if retry_count == 0:
+                logging.warning(f"API Error in {operation} for {symbol}: {type(error).__name__}: {str(error)}")
+                if not isinstance(error, (ConnectionError, TimeoutError)):
+                    logging.debug(f"Traceback:\n{traceback.format_exc()}")
 
-    # Configuration Mehtods
+            # Check if retryable
+            retryable_errors = (ConnectionError, TimeoutError)
+            is_retryable = isinstance(error, retryable_errors) or \
+                        "HTTPError" in str(type(error)) or \
+                        "URLError" in str(type(error)) or \
+                        (hasattr(error, 'response') and
+                            hasattr(error.response, 'status_code') and
+                            500 <= error.response.status_code < 600)
 
-    """
-    - Adjusts update intervals
-    - Allows runtime tuning
-    - Validates inputs
-    - Updates internal config
-    """
-    def set_update_frequency(self, data_type, seconds):
-        pass
+            # Should we retry?
+            if is_retryable and retry_count < max_retries:
+                # Exponential backoff with jitter
+                delay = retry_delay * (2 ** retry_count) + (time.time() % 1)
+                logging.info(f"Retrying {operation} for {symbol} in {delay:.1f}s (attempt {retry_count + 1}/{max_retries})")
+                time.sleep(delay)
 
+                # Signal to caller to retry
+                context['retry_count'] = retry_count + 1
+                context['should_retry'] = True
+                return None
 
-    """
-    - Adds new symbol to monitoring
-    - Initializes data structures
-    - Queues for immediate fetch
-    - Thread-safe operation
-    """
-    def add_symbol(self, symbol):
-        pass
+            # Max retries exceeded or non-retryable
+            if retry_count >= max_retries:
+                logging.error(f"Max retries exceeded for {operation} (symbol: {symbol})")
+            else:
+                logging.error(f"Non-retryable error in {operation} for {symbol}")
 
+            context['should_retry'] = False
 
-    """
-    - Stops monitoring symbol
-    - Cleans up data
-    - Removes from queues
-    - Frees memory
-    """
-    def remove_symbol(self, symbol):
-        pass
+            # Track error stats
+            if not hasattr(self, '_error_count'):
+                self._error_count = 0
+            self._error_count += 1
+
+            if self._error_count % 100 == 0:
+                logging.warning(f"Total API errors: {self._error_count}")
+
+            return None
 
 
 # Helper Functions
@@ -535,7 +618,30 @@ def create_default_config():
 - Returns boolean
 """
 def validate_market_hours():
-    pass
+    # Get current time in ET (market timezone)
+    et_tz = pytz.timezone('America/New_York')
+    now_et = dt.datetime.now(et_tz)
+
+    # Quick check: weekends are always closed
+    if now_et.weekday() >= 5:  # Saturday = 5, Sunday = 6
+        return False
+
+    # Get NYSE calendar for holiday checking
+    nyse = mcal.get_calendar('NYSE')
+    today_str = now_et.strftime('%Y-%m-%d')
+
+    # Check if today is a trading day
+    schedule = nyse.schedule(start_date=today_str, end_date=today_str)
+    if schedule.empty:
+        return False  # Holiday
+
+    # Check if within market hours (9:30 AM - 4:00 PM ET)
+    market_open = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
+    market_close = now_et.replace(hour=16, minute=0, second=0, microsecond=0)
+
+    return market_open <= now_et <= market_close
+
+
 
 """
 - Determines update priority
