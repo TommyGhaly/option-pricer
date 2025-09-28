@@ -157,6 +157,9 @@ class MarketDataService:
         - Cleans up resources
         - Sets running flag to False
         """
+        for thread in self.option_threads:
+            if thread.is_alive():
+                thread.join(timeout=5)
         self.running = False
         # Could add thread.join() calls here to wait for threads to finish
         # Could add data persistence here
