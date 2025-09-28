@@ -84,3 +84,6 @@ market_data_cache/
 Thumbs.db
 .Spotlight-V100
 .Trashes
+
+# Market data files
+market_data_realtime
