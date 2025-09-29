@@ -1033,7 +1033,13 @@ if __name__ == "__main__":
     )
 
     # Define symbols to track
-    symbols = [SPY, QQQ, AAPL, MSFT, NVDA]
+    symbols = [
+                SPY, QQQ, IWM, DIA,
+                AAPL, MSFT, AMZN, GOOGL, TSLA, NVDA, META,
+                JPM, BAC, GS,
+                VIX, UVXY, SVXY,
+                XLF, XLE, XLK, GLD
+            ]
 
     # Configuration with file saving options
     config = {
