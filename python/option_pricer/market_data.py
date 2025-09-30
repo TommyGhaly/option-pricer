@@ -1,7 +1,7 @@
 import yfinance as yf
 import datetime as dt
 import threading as th
-from queue import Queue as qu
+from queue import Queue as qu, Empty
 import requests
 import json
 import time
@@ -13,6 +13,7 @@ import traceback
 from typing import Optional, Dict, Any
 import os
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 #service architecture for fetching and storing market data accessible across modules but not directly dependent on other modules
 
@@ -278,70 +279,59 @@ class MarketDataService:
                                     'retry_delay': 1})
             return {'calls': [], 'puts': [], 'last_updated': None}
 
+
+
     def _batch_fetch_spots(self, symbol_list):
         """
-        - Fetches multiple spot prices efficiently
-        - Uses Yahoo's batch capabilities
-        - Reduces API calls
-        - Returns dict of results
+        Fetches spot prices using Yahoo's batch quote endpoint with proper auth
         """
         quotes = {}
         if not symbol_list:
             return quotes
 
         url = f"https://query1.finance.yahoo.com/v7/finance/quote?symbols={','.join(symbol_list)}"
+
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'application/json',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Referer': 'https://finance.yahoo.com/'
         }
 
         try:
-            response = requests.get(url, headers=headers)
+            response = requests.get(url, headers=headers, timeout=10)
+            response.raise_for_status()
             data = response.json()
 
-            for quote in data.get('quoteResponse', {}).get('result', []):
-                symbol = quote.get('symbol')
+            for item in data.get('quoteResponse', {}).get('result', []):
+                symbol = item.get('symbol')
                 quotes[symbol] = {
-                    # Core Pricing Data
-                    'price': quote.get('regularMarketPrice'),
-                    'bid': quote.get('bid'),
-                    'ask': quote.get('ask'),
-                    'mid': (quote.get('bid', 0) + quote.get('ask', 0)) / 2 if quote.get('bid') is not None and quote.get('ask') is not None else None,
+                    'price': item.get('regularMarketPrice'),
+                    'bid': item.get('bid'),
+                    'ask': item.get('ask'),
+                    'mid': (item.get('bid', 0) + item.get('ask', 0)) / 2
+                        if item.get('bid') and item.get('ask') else None,
 
-                    # Volume and Size
-                    'volume': quote.get('regularMarketVolume'),
-                    'bid_size': quote.get('bidSize'),
-                    'ask_size': quote.get('askSize'),
-                    'avg_volume': quote.get('averageDailyVolume3Month'),
+                    'volume': item.get('regularMarketVolume'),
+                    'bid_size': item.get('bidSize'),
+                    'ask_size': item.get('askSize'),
+                    'avg_volume': item.get('averageDailyVolume3Month'),
 
-                    # Price Movements
-                    'open': quote.get('regularMarketOpen'),
-                    'high': quote.get('regularMarketDayHigh'),
-                    'low': quote.get('regularMarketDayLow'),
-                    'prev_close': quote.get('regularMarketPreviousClose'),
-                    'change': quote.get('regularMarketChange'),
-                    'change_pct': quote.get('regularMarketChangePercent'),
+                    'open': item.get('regularMarketOpen'),
+                    'high': item.get('regularMarketDayHigh'),
+                    'low': item.get('regularMarketDayLow'),
+                    'prev_close': item.get('regularMarketPreviousClose'),
 
-                    # Timestamps
-                    'timestamp': dt.datetime.now().timestamp(),
-                    'market_time': quote.get('regularMarketTime'),
-                    'quote_type': quote.get('quoteType'),
-
-                    # Additional Info
-                    'halted': quote.get('halted'),
-                    'currency': quote.get('currency'),
-                    'exchange': quote.get('exchange')
+                    'timestamp': item.get('regularMarketTime', dt.datetime.now().timestamp()),
+                    'exchange': item.get('exchange'),
+                    'currency': item.get('currency')
                 }
 
-        except Exception as e:
-            self._handle_api_error(e, {'operation': '_batch_fetch_spots',
-                                       'symbols': ','.join(symbol_list),
-                                       'retry_count': 0,
-                                       'max_retries': 3,
-                                       'retry_delay': 1})
-            # fallback: return empty dict
-            return {}
+        except requests.exceptions.RequestException as e:
+            print(f"Error fetching batch quotes: {e}")
 
         return quotes
+
 
     # Update Loops Methods
 
@@ -355,14 +345,6 @@ class MarketDataService:
         while self.running:
             if self.is_market_open():
                 try:
-                    # Update all symbols in batch (fast)
-                    batch_data = self._batch_fetch_spots(self.symbols)
-                    with self.data_lock:
-                        for symbol, data in batch_data.items():
-                            if symbol not in self.spot_data:
-                                self.spot_data[symbol] = {}
-                            self.spot_data[symbol].update(data)
-                            self.last_fetched["spot"][symbol] = dt.datetime.now().timestamp()
 
                     # Trigger immediate save for real-time monitoring
                     if self.save_to_file:
@@ -370,7 +352,7 @@ class MarketDataService:
                         self._save_metadata()
 
                     # Update priority symbols individually (full details)
-                    for symbol in self.priority_symbols:
+                    for symbol in self.symbols:
                         try:
                             detailed_data = self._fetch_spot_price(symbol)
                             if detailed_data:  # Only update if we got data
@@ -448,7 +430,7 @@ class MarketDataService:
                     self.option_update_queue.put((symbol, expiry))
                     self.option_update_queue.task_done()
 
-                except qu.Empty:
+                except Empty:
                     continue
                 except Exception as e:
                     self._handle_api_error(e, {'operation': '_option_chain_loop',
@@ -459,6 +441,8 @@ class MarketDataService:
                                             'retry_delay': 1})
             else:
                 time.sleep(60)  # Sleep longer when market is closed
+
+
 
     def _historical_data_loop(self):
         """
