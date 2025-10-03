@@ -107,10 +107,10 @@ class MarketDataService:
 
     def start(self) -> bool:
         """
-        - Performs initial data fetch for all symbols
-        - Starts all update Threads
-        - Sets running flag to True
-        - Returns when service is ready
+        Performs initial data fetch for all symbols
+        Starts all update Threads
+        Sets running flag to True
+        Returns when service is ready
         """
         try:
             self.running = True
@@ -153,10 +153,10 @@ class MarketDataService:
 
     def stop(self):
         """
-        - Gracefully stops all update Threads
-        - Saves any cached data
-        - Cleans up resources
-        - Sets running flag to False
+        Gracefully stops all update Threads
+        Saves any cached data
+        Cleans up resources
+        Sets running flag to False
         """
         for thread in self.option_threads:
             if thread.is_alive():
@@ -241,10 +241,10 @@ class MarketDataService:
 
     def _fetch_spot_price(self, symbol):
         """
-        - Fetches current spot data from yahoo
-        - Returns dict with price, bid, ask, volume
-        - Handles errors gracefully
-        - Single symbol fetch
+        Fetches current spot data from yahoo
+        Returns dict with price, bid, ask, volume
+        Handles errors gracefully
+        Single symbol fetch
         """
         ticker_data = {}
         try:
@@ -294,10 +294,10 @@ class MarketDataService:
 
     def _fetch_option_chain(self, symbol, expiry):
         """
-        - Retrieves complete option chain
-        - Returns processed calls/puts data
-        - Handles missing strikes
-        - Validates data quality
+        Retrieves complete option chain
+        Returns processed calls/puts data
+        Handles missing strikes
+        Validates data quality
         """
         try:
             option_chain = yf.Ticker(symbol).option_chain(expiry)
@@ -444,11 +444,11 @@ class MarketDataService:
 
     def _option_chain_loop(self):
         """
-        - Worker method for option updates
-        - Pulls from update queue
-        - Fetches and stores chain data
-        - Re-queues for next update
-        - Multiple instances run in parallel
+        Worker method for option updates
+        Pulls from update queue
+        Fetches and stores chain data
+        Re-queues for next update
+        Multiple instances run in parallel
         """
         while self.running:
             if self.is_market_open():
@@ -501,10 +501,10 @@ class MarketDataService:
 
     def _historical_data_loop(self):
         """
-        - Updates historical price data
-        - Runs less frequently (hourly)
-        - Maintains rolling window
-        - Used for volatility calculations
+        Updates historical price data
+        Runs less frequently (hourly)
+        Maintains rolling window
+        Used for volatility calculations
         """
         while self.running:
             try:
@@ -549,10 +549,10 @@ class MarketDataService:
 
     def _process_option_data(self, chain_df, option_type):
         """
-        - Converts DataFrame to dict format
-        - Extracts relevant fields
-        - Handles missing/invalid data
-        - Normalizes data structure
+        Converts DataFrame to dict format
+        Extracts relevant fields
+        Handles missing/invalid data
+        Normalizes data structure
         """
         processed = []
         for _, row in chain_df.iterrows():
@@ -577,10 +577,10 @@ class MarketDataService:
 
     def _detect_spot_change(self, symbol, old_price, new_price):
         """
-        - Compares new vs. cached price
-        - Calculates percentage change
-        - Returns boolean for significant move
-        - Triggers downstream updates
+        Compares new vs. cached price
+        Calculates percentage change
+        Returns boolean for significant move
+        Triggers downstream updates
         """
         if old_price == 0:
             return False
@@ -590,10 +590,10 @@ class MarketDataService:
 
     def _prioritize_option_updates(self, symbol):
         """
-        - Determines which options need updating
-        - Prioritizes by moneyness and expiry
-        - Adds to update queue with priority
-        - Balances update load
+        Determines which options need updating
+        Prioritizes by moneyness and expiry
+        Adds to update queue with priority
+        Balances update load
         """
         try:
             spot_price = self.spot_data.get(symbol, {}).get('price')
@@ -637,10 +637,10 @@ class MarketDataService:
 
     def _calculate_update_priority(self, symbol, data_type):
         """
-        - Determines update urgency
-        - Based on staleness and importance
-        - Returns priority score
-        - Used for queue ordering
+        Determines update urgency
+        Based on staleness and importance
+        Returns priority score
+        Used for queue ordering
         """
         now = time.time()
 
@@ -668,19 +668,19 @@ class MarketDataService:
 
     def is_market_open(self):
         '''
-        - Checks if market is currently open
-        - Adjusts update behavior
-        - Considers holidays
-        - Returns boolean
+        Checks if market is currently open
+        Adjusts update behavior
+        Considers holidays
+        Returns boolean
         '''
         return validate_market_hours()
 
     def _clean_stale_data(self):
         """
-        - Removes very old data
-        - Manages memory usage
-        - Runs periodically
-        - Configurable retention
+        Removes very old data
+        Manages memory usage
+        Runs periodically
+        Configurable retention
         """
         now = time.time()
 
@@ -712,10 +712,10 @@ class MarketDataService:
 
     def _handle_api_error(self, error, context):
         """
-        - Centralized error handling
-        - Logs errors appropriately
-        - Implements retry logic
-        - Prevents service disruption
+        Centralized error handling
+        Logs errors appropriately
+        Implements retry logic
+        Prevents service disruption
         """
         operation = context.get('operation', 'Unknown operation')
         symbol = context.get('symbol', 'N/A')
@@ -791,10 +791,10 @@ class MarketDataService:
 
     def _file_save_loop(self):
         """
-        - Continuously saves data to files
-        - Runs on separate thread
-        - Saves spot, options, and history data
-        - Updates metadata with timestamps
+        Continuously saves data to files
+        Runs on separate thread
+        Saves spot, options, and history data
+        Updates metadata with timestamps
         """
         while self.running:
             try:
@@ -806,10 +806,10 @@ class MarketDataService:
 
     def _save_all_data(self):
         """
-        - Saves all data types to their respective files
-        - Thread-safe data access
-        - Handles file I/O errors
-        - Updates metadata
+        Saves all data types to their respective files
+        Thread-safe data access
+        Handles file I/O errors
+        Updates metadata
         """
         try:
             # Save spot data
@@ -829,9 +829,9 @@ class MarketDataService:
 
     def _save_spot_data(self):
         """
-        - Saves spot price data to JSON file
-        - Includes all price, volume, and metadata
-        - Human-readable formatting
+        Saves spot price data to JSON file
+        Includes all price, volume, and metadata
+        Human-readable formatting
         """
         try:
             with self.data_lock:
@@ -852,9 +852,9 @@ class MarketDataService:
 
     def _save_option_data(self):
         """
-        - Saves option chain data to JSON file
-        - Organized by symbol and expiry
-        - Includes calls and puts
+        Saves option chain data to JSON file
+        Organized by symbol and expiry
+        Includes calls and puts
         """
         try:
             with self.data_lock:
@@ -877,9 +877,9 @@ class MarketDataService:
 
     def _save_historical_data(self):
         """
-        - Saves historical price data to JSON file
-        - Converts DataFrame to dict format
-        - Preserves date indices
+        Saves historical price data to JSON file
+        Converts DataFrame to dict format
+        Preserves date indices
         """
         try:
             with self.data_lock:
@@ -903,9 +903,9 @@ class MarketDataService:
 
     def _save_metadata(self):
         """
-        - Saves metadata about the data collection
-        - Includes update timestamps and statistics
-        - Helps monitor service health
+        Saves metadata about the data collection
+        Includes update timestamps and statistics
+        Helps monitor service health
         """
         try:
             metadata = {
@@ -940,9 +940,9 @@ class MarketDataService:
 
     def get_data_files(self):
         """
-        - Returns paths to all data files
-        - Useful for external monitoring
-        - Can be called to find where data is saved
+        Returns paths to all data files
+        Useful for external monitoring
+        Can be called to find where data is saved
         """
         return {
             'spot': self.spot_file,
@@ -954,8 +954,8 @@ class MarketDataService:
 
     def enable_file_monitoring(self, enable=True):
         """
-        - Enable or disable file saving at runtime
-        - Useful for debugging or performance tuning
+        Enable or disable file saving at runtime
+        Useful for debugging or performance tuning
         """
         self.save_to_file = enable
         if enable and hasattr(self, 'save_thread') and not self.save_thread.is_alive():
@@ -974,18 +974,18 @@ class MarketDataService:
 
     def get_spot_price(self, symbol):
         """
-        - Get current spot price for a symbol
-        - Returns dict with price data
-        - Thread-safe access
+        Get current spot price for a symbol
+        Returns dict with price data
+        Thread-safe access
         """
         with self.data_lock:
             return self.spot_data.get(symbol, {}).copy()
 
     def get_option_chain(self, symbol, expiry=None):
         """
-        - Get option chain for a symbol
-        - Optional expiry filter
-        - Returns chain data or all expiries
+        Get option chain for a symbol
+        Optional expiry filter
+        Returns chain data or all expiries
         """
         with self.data_lock:
             if symbol not in self.option_chain:
@@ -998,18 +998,18 @@ class MarketDataService:
 
     def get_all_spot_prices(self):
         """
-        - Get all current spot prices
-        - Returns dict of all symbols
-        - Thread-safe copy
+        Get all current spot prices
+        Returns dict of all symbols
+        Thread-safe copy
         """
         with self.data_lock:
             return self.spot_data.copy()
 
     def get_data_summary(self):
         """
-        - Get summary of all available data
-        - Includes counts and last update times
-        - Useful for monitoring
+        Get summary of all available data
+        Includes counts and last update times
+        Useful for monitoring
         """
         with self.data_lock:
             summary = {
