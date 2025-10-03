@@ -5,6 +5,8 @@ from queue import PriorityQueue as pq
 import os
 from fredapi import Fred
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import datetime as dt
+import math
 
 
 # retrieve api key from FRED website
@@ -226,7 +228,10 @@ class CalibrationService:
         Simple but essential calculation
         Cached for performance
         """
-        pass
+        if T <= 0:
+            return S  # At expiry, forward = spot
+
+        return S * math.exp((r - q) * T)
 
 
     # SABR Calibration
@@ -460,25 +465,43 @@ class CalibrationService:
 
 
 
-    def _calculate_time_to_maturity(self, expiry_string):
+    def _calculate_time_to_maturity(self, expiry_string, use_trading_days=False):
         """
         Converts expiry date string to years
-        Handles datetime parsing
-        Returns fractional years
-        Accounts for market calendar
-        Returns None if expired
+
+        Args:
+            expiry_string: Date string in format '%Y-%m-%d %H:%M:%S'
+            use_trading_days: If True, uses 252 trading days/year. If False, uses 365.25 calendar days/year
+
+        Returns:
+            float: Fractional years to maturity
+            None: If option has expired
         """
-        pass
+        expiry = dt.strptime(expiry_string, '%Y-%m-%d %H:%M:%S')
+        now = dt.now()
+
+        # Check if expired
+        if now > expiry:
+            return None
+
+        time_diff = expiry - now
+
+        # Choose day count convention
+        days_per_year = 252 if use_trading_days else 365.25
+        years = time_diff.total_seconds() / (days_per_year * 24 * 3600)
+
+        return years
 
 
 
-    def _get_historical_volatility(self, window_days=30):
+    def _get_historical_volatility(self, symbol, window_days=30):
         """
         Calculates realized volatility from historical data
         Used for parameter initialization
         Returns annualized volatility
         Fallback when calibration unavailable
         """
+        da
         pass
 
 
