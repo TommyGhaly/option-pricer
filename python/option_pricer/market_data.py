@@ -169,40 +169,75 @@ class MarketDataService:
 
     def _initial_data_load(self):
         """
-        - One-time bulk fetch of spot prices for all symbols
-        - Populates all data structures
-        - Prioritizes spot prices first
-        - Queues all options chains
-        - Provides immediate data availability
+        Initial load using reliable yfinance Tickers method
         """
-        counter = 0
+        print("\n" + "="*60)
+        print("STARTING INITIAL DATA LOAD")
+        print("="*60)
+
+        print("\n[1/3] Fetching spot prices...")
         self.spot_data = self._batch_fetch_spots(self.symbols)
 
-        for symbol in self.symbols:
+        if not self.spot_data:
+            print("\n⚠️  WARNING: No spot data loaded!")
+            return
+
+        print(f"\n✓ Loaded spot data for {len(self.spot_data)}/{len(self.symbols)} symbols")
+
+        # Step 2: Queue option expiries
+        print("\n[2/3] Loading option expiries...")
+        total_expiries = 0
+        successful_symbols = 0
+
+        for i, symbol in enumerate(self.symbols):
+            if symbol == '^VIX':
+                print(f"  [{i+1}/{len(self.symbols)}] {symbol}: Skipped (index)")
+                continue
+
+            if not (self.spot_data.get(symbol) and self.spot_data[symbol].get('price')):
+                print(f"  [{i+1}/{len(self.symbols)}] {symbol}: Skipped (no spot price)")
+                continue
+
             try:
                 ticker = yf.Ticker(symbol)
                 expiries = ticker.options
 
-                for option_expiry in expiries:
-                    if self.spot_data.get(symbol) and self.spot_data[symbol].get('price'):
-                        self.option_update_queue.put((symbol, option_expiry))
+                if not expiries:
+                    print(f"  [{i+1}/{len(self.symbols)}] {symbol}: No options")
+                    continue
 
-                if counter < 10:
-                    t = th.Thread(
-                        target=self._option_chain_loop,
-                        name=f"OptionChainUpdater-{counter}",
-                        daemon=True  # Dies when main program exits
-                    )
-                    t.start()
-                    self.option_threads.append(t)
-                    counter += 1
+                for option_expiry in expiries:
+                    self.option_update_queue.put((symbol, option_expiry))
+                    total_expiries += 1
+
+                successful_symbols += 1
+                print(f"  [{i+1}/{len(self.symbols)}] {symbol}: Queued {len(expiries)} expiries")
+
+                time.sleep(0.3)  # Delay between symbols
 
             except Exception as e:
-                self._handle_api_error(e, {'operation': '_initial_data_load',
-                                           'symbol': symbol,
-                                           'retry_count': 0,
-                                           'max_retries': 3,
-                                           'retry_delay': 1})
+                print(f"  [{i+1}/{len(self.symbols)}] {symbol}: Error - {e}")
+                time.sleep(0.3)
+
+        print(f"\n✓ Queued {total_expiries} option expiries from {successful_symbols} symbols")
+
+        # Step 3: Start workers
+        print("\n[3/3] Starting option worker threads...")
+        num_workers = min(10, max(2, total_expiries // 20))
+
+        for i in range(num_workers):
+            t = th.Thread(
+                target=self._option_chain_loop,
+                name=f"OptionChainUpdater-{i}",
+                daemon=True
+            )
+            t.start()
+            self.option_threads.append(t)
+
+        print(f"✓ Started {num_workers} option chain worker threads")
+        print("\n" + "="*60)
+        print("INITIAL DATA LOAD COMPLETE")
+        print("="*60 + "\n")
 
     def _fetch_spot_price(self, symbol):
         """
@@ -255,6 +290,8 @@ class MarketDataService:
                                        'retry_delay': 1})
         return ticker_data
 
+
+
     def _fetch_option_chain(self, symbol, expiry):
         """
         - Retrieves complete option chain
@@ -281,54 +318,75 @@ class MarketDataService:
 
 
 
-    def _batch_fetch_spots(self, symbol_list):
+    def _batch_fetch_spots(self, symbol_list, max_retries=2):
         """
-        Fetches spot prices using Yahoo's batch quote endpoint with proper auth
+        Fetches spot prices using yfinance.Tickers()
+        Most reliable method for batch fetching
         """
         quotes = {}
+
         if not symbol_list:
             return quotes
 
-        url = f"https://query1.finance.yahoo.com/v7/finance/quote?symbols={','.join(symbol_list)}"
+        for attempt in range(max_retries):
+            try:
+                print(f"Fetching {len(symbol_list)} symbols using Tickers method...")
 
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'application/json',
-            'Accept-Language': 'en-US,en;q=0.9',
-            'Referer': 'https://finance.yahoo.com/'
-        }
+                # Create a Tickers object for batch operations
+                tickers = yf.Tickers(' '.join(symbol_list))
 
-        try:
-            response = requests.get(url, headers=headers, timeout=10)
-            response.raise_for_status()
-            data = response.json()
+                for symbol in symbol_list:
+                    try:
+                        ticker = tickers.tickers[symbol]
+                        info = ticker.info
 
-            for item in data.get('quoteResponse', {}).get('result', []):
-                symbol = item.get('symbol')
-                quotes[symbol] = {
-                    'price': item.get('regularMarketPrice'),
-                    'bid': item.get('bid'),
-                    'ask': item.get('ask'),
-                    'mid': (item.get('bid', 0) + item.get('ask', 0)) / 2
-                        if item.get('bid') and item.get('ask') else None,
+                        if info and 'regularMarketPrice' in info:
+                            quotes[symbol] = {
+                                'price': info.get('regularMarketPrice'),
+                                'bid': info.get('bid'),
+                                'ask': info.get('ask'),
+                                'mid': (info.get('bid', 0) + info.get('ask', 0)) / 2
+                                    if info.get('bid') and info.get('ask') else info.get('regularMarketPrice'),
+                                'volume': info.get('volume'),
+                                'bid_size': info.get('bidSize'),
+                                'ask_size': info.get('askSize'),
+                                'avg_volume': info.get('averageVolume'),
+                                'open': info.get('open'),
+                                'high': info.get('dayHigh'),
+                                'low': info.get('dayLow'),
+                                'prev_close': info.get('previousClose'),
+                                'timestamp': dt.datetime.now().timestamp(),
+                                'exchange': info.get('exchange'),
+                                'currency': info.get('currency')
+                            }
+                            print(f"  ✓ {symbol}: ${info.get('regularMarketPrice')}")
 
-                    'volume': item.get('regularMarketVolume'),
-                    'bid_size': item.get('bidSize'),
-                    'ask_size': item.get('askSize'),
-                    'avg_volume': item.get('averageDailyVolume3Month'),
+                        # Small delay between symbols to be gentle on API
+                        time.sleep(0.15)
 
-                    'open': item.get('regularMarketOpen'),
-                    'high': item.get('regularMarketDayHigh'),
-                    'low': item.get('regularMarketDayLow'),
-                    'prev_close': item.get('regularMarketPreviousClose'),
+                    except Exception as e:
+                        print(f"  ✗ {symbol}: {e}")
+                        continue
 
-                    'timestamp': item.get('regularMarketTime', dt.datetime.now().timestamp()),
-                    'exchange': item.get('exchange'),
-                    'currency': item.get('currency')
-                }
+                if quotes:
+                    print(f"Successfully fetched {len(quotes)}/{len(symbol_list)} spot prices")
+                    return quotes
+                else:
+                    print(f"Attempt {attempt + 1}/{max_retries} returned no data")
+                    if attempt < max_retries - 1:
+                        wait_time = 5 * (attempt + 1)
+                        print(f"Waiting {wait_time}s before retry...")
+                        time.sleep(wait_time)
 
-        except requests.exceptions.RequestException as e:
-            print(f"Error fetching batch quotes: {e}")
+            except Exception as e:
+                print(f"Error in batch fetch attempt {attempt + 1}/{max_retries}: {e}")
+                if attempt < max_retries - 1:
+                    time.sleep(5)
+
+        # If still no data, try fallback
+        if not quotes:
+            print("Batch method failed, using individual fallback...")
+            return self._fallback_individual_fetch(symbol_list)
 
         return quotes
 
@@ -337,55 +395,52 @@ class MarketDataService:
 
     def _spot_price_loop(self):
         """
-        - Main spot price update loop
-        - Runs every 5 seconds
-        - Detects significant changes
-        - Triggers option updates if needed
+        Main spot price update loop using Tickers method
         """
+        loop_count = 0
+
         while self.running:
             if self.is_market_open():
+                loop_count += 1
                 try:
+                    # Use Tickers method for updates
+                    batch_data = self._batch_fetch_spots(self.symbols)
 
-                    # Trigger immediate save for real-time monitoring
-                    if self.save_to_file:
-                        self._save_spot_data()
-                        self._save_metadata()
+                    if batch_data:
+                        updates = 0
+                        price_changes = 0
 
-                    # Update priority symbols individually (full details)
-                    for symbol in self.symbols:
-                        try:
-                            detailed_data = self._fetch_spot_price(symbol)
-                            if detailed_data:  # Only update if we got data
-                                with self.data_lock:
-                                    if symbol not in self.spot_data:
-                                        self.spot_data[symbol] = {}
+                        with self.data_lock:
+                            for symbol, data in batch_data.items():
+                                old_price = self.spot_data.get(symbol, {}).get('price', 0)
+                                new_price = data.get('price', 0)
 
-                                    # Check for price change before updating
-                                    old_price = self.spot_data[symbol].get('price', 0)
-                                    new_price = detailed_data.get('price', 0)
+                                self.spot_data[symbol] = data
+                                self.last_fetched["spot"][symbol] = dt.datetime.now().timestamp()
+                                updates += 1
 
-                                    self.spot_data[symbol].update(detailed_data)
-                                    self.last_fetched["spot"][symbol] = dt.datetime.now().timestamp()
+                                if old_price and new_price and self._detect_spot_change(symbol, old_price, new_price):
+                                    self._prioritize_option_updates(symbol)
+                                    price_changes += 1
 
-                                    if old_price and new_price and self._detect_spot_change(symbol, old_price, new_price):
-                                        self._prioritize_option_updates(symbol)
+                        if loop_count % 12 == 0:  # Log every minute
+                            print(f"Spot update: {updates} symbols updated, {price_changes} significant changes")
 
-                        except Exception as e:
-                            self._handle_api_error(e, {'operation': '_spot_price_loop',
-                                                    'symbol': symbol,
-                                                    'retry_count': 0,
-                                                    'max_retries': 3,
-                                                    'retry_delay': 1})
+                        if self.save_to_file:
+                            self._save_spot_data()
+                            self._save_metadata()
+                    else:
+                        print("⚠️  Spot update returned no data")
 
                 except Exception as e:
-                    self._handle_api_error(e, {'operation': '_spot_price_loop',
-                                            'retry_count': 0,
-                                            'max_retries': 3,
-                                            'retry_delay': 1})
+                    print(f"Error in spot price loop: {e}")
 
                 time.sleep(self.update_frequency['spot'])
             else:
-                time.sleep(60)  # Sleep longer when market is closed
+                if loop_count % 60 == 0:
+                    print("Market closed - spot updates paused")
+                time.sleep(60)
+
 
     def _option_chain_loop(self):
         """
