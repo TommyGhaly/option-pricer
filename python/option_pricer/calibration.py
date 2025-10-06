@@ -1,4 +1,5 @@
 from market_data import MarketDataService
+from __init__ import __all__
 import threading as th
 import queue as qu
 from queue import PriorityQueue as pq
@@ -7,13 +8,11 @@ from fredapi import Fred
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import datetime as dt
 import math
-
+import numpy as np
+import json
 
 # retrieve api key from FRED website
 fred = Fred(api_key=os.environ["FRED_API_KEY"])
-
-gdp = fred.get_series('GDP')
-print(gdp.tail())
 
 class CalibrationService:
 
@@ -116,16 +115,33 @@ class CalibrationService:
 
 
     # File Monitoring Methods
-    def _check_file_updates(self):
+    def _check_file_data(self, symbol):
         """
-        Checks modification times of all data files
-        Compares against last-known timestamps
-        Returns dictionary of changed files
-        Triggers appropriate update handlers
-        Minimal I/O overhead (stat calls only)
-        Runs every calibration_interval seconds
+        Checks if new market data available since last calibration
+        Compares metadata timestamps vs last calibration time
+        Returns True if data is newer
+        Avoids redundant calibrations
         """
-        pass
+        # Load metadata
+        metadata_path = os.path.join(self.data_directory, self.file_paths["meta"])
+        with open(metadata_path, 'r') as f:
+            metadata = json.load(f)
+
+        # Get last data update time
+        last_spot_update = metadata['last_fetched_times']['spot'].get(symbol)
+        last_options_update = metadata['last_fetched_times']['options'].get(f"{symbol}_<expiry>")
+
+        # Compare to last calibration time
+        if self.last_calibration_time[symbol] is None:
+            return True  # Never calibrated
+
+        # Parse timestamps and compare
+        last_data_time = max(
+            dt.fromisoformat(last_spot_update),
+            dt.fromisoformat(last_options_update)
+        )
+
+        return last_data_time > self.last_calibration_time[symbol]
 
 
     def _load_market_data(self):
@@ -137,9 +153,83 @@ class CalibrationService:
         Thread-safe with lock
         Handles file read errors gracefully
         """
-        pass
+        # Read and load the json files
+        try:
+            spot_path = os.path.join(self.data_directory, self.file_paths["spot"])
+            with open(spot_path, 'r') as f:
+                spot_data = json.load(f)
+
+            option_path = os.path.join(self.data_directory, self.file_paths["option"])
+            with open(option_path, 'r') as f:
+                option_data = json.load(f)
+
+            history_path = os.path.join(self.data_directory, self.file_paths["history"])
+            with open(history_path, 'r') as f:
+                history_data = json.load(f)
+
+        except Exception as e:
+            print(f"Failed to load JSON file. Error: {e}")
+            return  # Don't proceed if files couldn't be loaded
+
+        # Validate data integrity - iterate correctly over nested dict
+        for ticker, ticker_value in option_data.items():  # .items() not .keys()
+            for date, date_value in ticker_value.items():  # .items() not .keys()
+                # Filter out invalid options instead of modifying during iteration
+                date_value["calls"] = [
+                    option for option in date_value.get("calls", [])
+                    if self._validate_option_data(option)
+                ]
+                date_value["puts"] = [
+                    option for option in date_value.get("puts", [])
+                    if self._validate_option_data(option)
+                ]
+
+        # Update instance variables
+        with self.lock:  # If you have threading
+            self.spot_prices = spot_data
+            self.option_chains = option_data
+            self.historical_data = history_data
 
 
+
+        """
+        Reads JSON files when changes detected
+        Parses into Python data structures
+        Validates data integrity
+        Updates spot_prices, option_chains, historical_data
+        Thread-safe with lock
+        Handles file read errors gracefully
+        """
+        # Read and laod the json files
+        try:
+            spot_path = os.path.join(self.data_directory, self.file_paths["spot"])
+            with open(spot_path, 'r') as f:
+                spot_data = json.load(f)
+
+
+            option_path = os.path.join(self.data_directory, self.file_paths["option"])
+            with open(option_path, 'r') as f:
+                option_data = json.load(f)
+
+            history_path = os.path.join(self.data_directory, self.file_paths["history"])
+            with open(history_path, 'r') as f:
+                history_data = json.load(f)
+        except Exception as e:
+            print(f"failed to load json file \n Code ended on exception {e}")
+        # Validate data integrity
+        for _, ticker_value in option_data.keys():
+            for _, date_value in ticker_value.keys():
+                for option in date_value["calls"]:
+                    if not self._validate_option_data(option):
+                        date_value["calls"].pop(option)
+                for option in date_value["puts"]:
+                    if not self._validate_option_data(option):
+                        date_value["puts"].pop(option)
+
+
+        self.spot_prices = spot_data
+        self.options_chains = option_data
+        self.historical_data = history_data
 
     def _detect_significant_changes(self):
         """
@@ -154,7 +244,7 @@ class CalibrationService:
 
 
     # Implied Volatility Calculation Methods
-    def _calculate_implied_vol(self, S, K, r, T, is_call, q = 0):
+    def _calculate_implied_vol(self, market_price, S, K, r, T, is_call, q = 0):
         """
         Implements Newton-Raphson iteration
         Starts with reasonable initial guess (20%)
@@ -164,7 +254,7 @@ class CalibrationService:
         Handles edge cases (deep ITM/OTM)
         Validates result is reasonable (0.01 < iv < 3.0)
         """
-        pass
+        initial_guess = 0.2
 
 
     def _calculate_all_implied_vols(self, symbol, expiry):
@@ -272,7 +362,28 @@ class CalibrationService:
         Returns boolean validity
         Prevents storing nonsensical parameters
         """
-        pass
+        # Check positivity constraints
+        if alpha <= 0 or nu <= 0:  # Should be strictly positive, not just non-negative
+            return False
+
+        # Check beta range
+        if beta < 0 or beta > 1:
+            return False
+
+        # Check correlation bounds (strict inequality to avoid numerical issues)
+        if rho <= -1 or rho >= 1:
+            return False
+
+        # Check reasonable upper bounds to prevent explosion
+        if alpha > 5.0 or nu > 5.0:  # Unrealistically high values
+            return False
+
+        # Optional: Check Feller condition for CIR-like behavior
+        # More relevant when beta is close to 0.5
+        # if 2 * alpha * beta < nu ** 2:
+        #     return False
+
+        return True
 
 
 
@@ -319,14 +430,35 @@ class CalibrationService:
 
     def _validate_heston_parameters(self, kappa, theta, sigma, rho, v0):
         """
-        Checks Feller condition: 2kappatheta > sigma^2
+        Checks Feller condition: 2*kappa*theta ≥ sigma^2
         Ensures rho between -1 and 1
         Validates all parameters positive (except rho)
         Tests for numerical stability
         Returns boolean validity
         Critical for meaningful parameters
         """
-        pass
+        # Check positivity (strictly positive for most parameters)
+        if kappa <= 0 or theta <= 0 or sigma <= 0 or v0 < 0:
+            return False
+
+        # Check correlation bounds (strict inequality to avoid numerical issues)
+        if rho <= -1 or rho >= 1:
+            return False
+
+        # Check Feller condition: 2*kappa*theta ≥ sigma^2
+        # Ensures variance process stays positive
+        if 2 * kappa * theta < sigma ** 2:
+            return False
+
+        # Check reasonable upper bounds to prevent instability
+        if kappa > 50 or sigma > 5.0 or theta > 2.0:
+            return False
+
+        # Check v0 is reasonable relative to theta
+        if v0 > 10 * theta or v0 > 2.0:  # Initial var shouldn't be too extreme
+            return False
+
+        return True
 
 
     # Local Volatility Methods
@@ -449,19 +581,51 @@ class CalibrationService:
         Returns boolean validity
         Filters out bad data before calibration
         """
-        pass
+        # Check for None values first
+        if option.get("bid") is None or option.get("ask") is None or option.get("mid") is None:
+            return False
+
+        if option.get("impliedVolatility") is None:
+            return False
+
+        # Validate bid-ask relationship
+        if option["bid"] > option["mid"] or option["mid"] > option["ask"]:
+            return False
+
+        # Check for positive prices
+        if option["mid"] <= 0 or option["bid"] < 0:
+            return False
+
+        # Verify reasonable IV
+        if option["impliedVolatility"] <= 0.05 or option["impliedVolatility"] >= 2.0:
+            return False
+
+        return True
 
 
 
-    def _check_arbritrage_bounds(self, option, S, K, r, T, is_call, q = 0):
+    def _check_arbitrage_bounds(self, option, S, K, r, T, is_call, q=0):
         """
         Verifies option price within no-arbitrage bounds
-        Call: max(S - Kexp(-rT), 0) ≤ price ≤ S
-        Put: max(Kexp(-rT) - S, 0) ≤ price ≤ Kexp(-rT)
+        Call: max(S*exp(-qT) - K*exp(-rT), 0) ≤ price ≤ S*exp(-qT)
+        Put: max(K*exp(-rT) - S*exp(-qT), 0) ≤ price ≤ K*exp(-rT)
         Returns boolean validity
         Critical for data quality
         """
-        pass
+        discount_factor = math.exp(-r * T)
+        forward_discount = math.exp(-q * T)
+        discounted_spot = S * forward_discount
+        discounted_strike = K * discount_factor
+
+        if is_call:
+            lower_bound = max(discounted_spot - discounted_strike, 0)
+            upper_bound = discounted_spot
+        else:
+            lower_bound = max(discounted_strike - discounted_spot, 0)
+            upper_bound = discounted_strike  # Fixed: was S, should be K*exp(-rT)
+
+        return lower_bound <= option["mid"] <= upper_bound
+
 
 
 
@@ -493,7 +657,6 @@ class CalibrationService:
         return years
 
 
-
     def _get_historical_volatility(self, symbol, window_days=30):
         """
         Calculates realized volatility from historical data
@@ -501,8 +664,24 @@ class CalibrationService:
         Returns annualized volatility
         Fallback when calibration unavailable
         """
-        da
-        pass
+        if window_days > 365:
+            window_days = 360
+
+        symbol_data = self.historical_data[symbol]
+        dates = sorted(symbol_data.keys())
+        closes = [symbol_data[date]["Close"] for date in dates[-window_days:]]
+
+        # Calculate log returns
+        log_returns = []
+        for i in range(1, len(closes)):
+            log_return = np.log(closes[i] / closes[i-1])
+            log_returns.append(log_return)
+
+        # Calculate annualized volatility
+        daily_vol = np.std(log_returns)
+        annual_vol = daily_vol * np.sqrt(252)
+
+        return annual_vol
 
 
     # Persistent Methods

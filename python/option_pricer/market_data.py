@@ -567,7 +567,6 @@ class MarketDataService:
                     'volume': row.get('volume'),
                     'openInterest': row.get('openInterest'),
                     'impliedVolatility': row.get('impliedVolatility'),
-                    'expiration': row.get('expiration'),
                     'type': option_type,
                     'last_updated': dt.datetime.now().timestamp()
                 })
