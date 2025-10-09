@@ -31,7 +31,7 @@ if _option_pricer is None:
     raise ImportError("Could not find option_pricer compiled module. Please ensure it's built and in the package directory.")
 
 # Core Options Pricing Functions
-def black_scholes(S, K, r, sigma, T, is_call):
+def black_scholes(S, K, r, q, sigma, T, is_call):
     """
     Calculate option price using Black-Scholes model
 
@@ -43,9 +43,9 @@ def black_scholes(S, K, r, sigma, T, is_call):
     T: Time to maturity
     is_call: True for call, False for put
     """
-    return _option_pricer.black_scholes(S, K, r, sigma, T, is_call)
+    return _option_pricer.black_scholes(S, K, r, q, sigma, T, is_call)
 
-def binomial_tree(S, K, r, sigma, T, steps, is_call, american=True):
+def binomial_tree(S, K, r, q,  sigma, T, steps, is_call, american=True):
     """
     Calculate option price using binomial tree model
 
@@ -60,11 +60,11 @@ def binomial_tree(S, K, r, sigma, T, steps, is_call, american=True):
     american: True for American, False for European
     """
     if american:
-        return _option_pricer.binomial_tree_american(S, K, r, sigma, T, steps, is_call)
+        return _option_pricer.binomial_tree_american(S, K, r, q, sigma, T, steps, is_call)
     else:
-        return _option_pricer.binomial_tree_european(S, K, r, sigma, T, steps, is_call)
+        return _option_pricer.binomial_tree_european(S, K, r, q, sigma, T, steps, is_call)
 
-def monte_carlo(S, K, r, sigma, T, simulations, is_call, american=True):
+def monte_carlo(S, K, r, q, sigma, T, simulations, is_call, american=True):
     """
     Calculate option price using Monte Carlo simulation
 
@@ -79,49 +79,49 @@ def monte_carlo(S, K, r, sigma, T, simulations, is_call, american=True):
     american: True for American, False for Asian
     """
     if american:
-        return _option_pricer.monte_carlo_american_option(S, K, r, sigma, T, simulations, is_call)
+        return _option_pricer.monte_carlo_american_option(S, K, r, q, sigma, T, simulations, is_call)
     else:
-        return _option_pricer.monte_carlo_asian_option(S, K, r, sigma, T, simulations, is_call)
+        return _option_pricer.monte_carlo_asian_option(S, K, r, q, sigma, T, simulations, is_call)
 
 # Greek Calculations
-def delta(S, K, r, sigma, T, is_call):
+def delta(S, K, r, q, sigma, T, is_call):
     """Calculate option delta"""
-    return _option_pricer.delta(S, K, r, sigma, T, is_call)
+    return _option_pricer.delta(S, K, r, q, sigma, T, is_call)
 
-def gamma(S, K, r, sigma, T, is_call):
+def gamma(S, K, r, q, sigma, T, is_call):
     """Calculate option gamma"""
-    return _option_pricer.gamma(S, K, r, sigma, T, is_call)
+    return _option_pricer.gamma(S, K, r, q, sigma, T, is_call)
 
-def vega(S, K, r, sigma, T, is_call):
+def vega(S, K, r, q, sigma, T, is_call):
     """Calculate option vega"""
-    return _option_pricer.vega(S, K, r, sigma, T, is_call)
+    return _option_pricer.vega(S, K, r, q, sigma, T, is_call)
 
-def theta(S, K, r, sigma, T, is_call):
+def theta(S, K, r, q, sigma, T, is_call):
     """Calculate option theta"""
-    return _option_pricer.theta(S, K, r, sigma, T, is_call)
+    return _option_pricer.theta(S, K, r, q, sigma, T, is_call)
 
-def rho(S, K, r, sigma, T, is_call):
+def rho(S, K, r, q, sigma, T, is_call):
     """Calculate option rho"""
-    return _option_pricer.rho(S, K, r, sigma, T, is_call)
+    return _option_pricer.rho(S, K, r, q, sigma, T, is_call)
 
-def vanna(S, K, r, sigma, T, is_call):
+def vanna(S, K, r, q, sigma, T, is_call):
     """Calculate option vanna (dVega/dSpot)"""
-    return _option_pricer.vanna(S, K, r, sigma, T, is_call)
+    return _option_pricer.vanna(S, K, r, q, sigma, T, is_call)
 
-def charm(S, K, r, sigma, T, is_call):
+def charm(S, K, r, q, sigma, T, is_call):
     """Calculate option charm (dDelta/dTime)"""
-    return _option_pricer.charm(S, K, r, sigma, T, is_call)
+    return _option_pricer.charm(S, K, r, q, sigma, T, is_call)
 
-def vomma(S, K, r, sigma, T, is_call):
+def vomma(S, K, r, q, sigma, T, is_call):
     """Calculate option vomma (dVega/dVol)"""
-    return _option_pricer.vomma(S, K, r, sigma, T, is_call)
+    return _option_pricer.vomma(S, K, r, q, sigma, T, is_call)
 
-def veta(S, K, r, sigma, T, is_call):
+def veta(S, K, r, q, sigma, T, is_call):
     """Calculate option veta (dVega/dTime)"""
-    return _option_pricer.veta(S, K, r, sigma, T, is_call)
+    return _option_pricer.veta(S, K, r, q, sigma, T, is_call)
 
 # Advanced Models
-def heston_model(S, K, r, T, kappa, theta, sigma, rho, v0, is_call):
+def heston_model(S, K, r, q, T, kappa, theta, sigma, rho, v0, is_call):
     """
     Calculate option price using Heston stochastic volatility model
 
@@ -137,9 +137,9 @@ def heston_model(S, K, r, T, kappa, theta, sigma, rho, v0, is_call):
     v0: Initial variance
     is_call: True for call, False for put
     """
-    return _option_pricer.heston_model(S, K, r, T, kappa, theta, sigma, rho, v0, is_call)
+    return _option_pricer.heston_model(S, K, r, q, T, kappa, theta, sigma, rho, v0, is_call)
 
-def jump_diffusion(S, K, r, sigma, T, lambda_, mu_j, sigma_j, simulations, is_call):
+def jump_diffusion(S, K, r, q, sigma, T, lambda_, mu_j, sigma_j, simulations, is_call):
     """
     Calculate option price using Merton jump diffusion model
 
@@ -155,9 +155,9 @@ def jump_diffusion(S, K, r, sigma, T, lambda_, mu_j, sigma_j, simulations, is_ca
     simulations: Number of simulation paths
     is_call: True for call, False for put
     """
-    return _option_pricer.jump_diffusion(S, K, r, sigma, T, lambda_, mu_j, sigma_j, simulations, is_call)
+    return _option_pricer.jump_diffusion(S, K, r, q, sigma, T, lambda_, mu_j, sigma_j, simulations, is_call)
 
-def local_volatility(S, K, r, T, is_call, american=True):
+def local_volatility(S, K, r, q, T, is_call, american=True):
     """
     Calculate option price using local volatility model with FDM
 
@@ -170,9 +170,9 @@ def local_volatility(S, K, r, T, is_call, american=True):
     american: True for American, False for European
     """
     if american:
-        return _option_pricer.american_local_vol_fdm(S, K, r, T, is_call)
+        return _option_pricer.american_local_vol_fdm(S, K, r, q, T, is_call)
     else:
-        return _option_pricer.european_local_vol_fdm(S, K, r, T, is_call)
+        return _option_pricer.european_local_vol_fdm(S, K, r, q, T, is_call)
 
 # SABR Model Functions
 def sabr_implied_vol(S, K, r, T, alpha, beta, rho, nu):

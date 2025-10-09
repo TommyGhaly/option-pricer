@@ -1,5 +1,5 @@
 from market_data import MarketDataService
-from __init__ import __all__
+from __init__ import *
 import threading as th
 import queue as qu
 from queue import PriorityQueue as pq
@@ -42,7 +42,7 @@ class CalibrationService:
         self.spot_prices = {}
         self.options_chains = {}
         self.historical_data = {}
-        self.rist_free_rate = {
+        self.risk_free_rate = {
             '1m' : self._get_rf_rate("1m"),
             '3m' : self._get_rf_rate("3m"),
             '1y' : self._get_rf_rate("1y")
@@ -244,7 +244,7 @@ class CalibrationService:
 
 
     # Implied Volatility Calculation Methods
-    def _calculate_implied_vol(self, market_price, S, K, r, T, is_call, q = 0):
+    def _calculate_implied_vol(self, market_price, S, K, r, T, is_call, q=0):
         """
         Implements Newton-Raphson iteration
         Starts with reasonable initial guess (20%)
@@ -255,6 +255,39 @@ class CalibrationService:
         Validates result is reasonable (0.01 < iv < 3.0)
         """
         initial_guess = 0.2
+        sigma = initial_guess
+        max_iter = 100  # 10000 is way too many
+
+        for i in range(max_iter):
+            # Calculate BS price and vega at current sigma
+            bs_price = black_scholes(S, K, r, q, sigma, T, is_call)
+            vega_val = vega(S, K, r, q, sigma, T, is_call)  # Don't shadow function name
+
+            diff = bs_price - market_price
+
+            # Check convergence (use abs() to check both positive and negative)
+            if abs(diff) < 1e-6:
+                # Validate result is reasonable
+                if 0.01 < sigma < 3.0:
+                    return sigma
+                else:
+                    return None  # IV outside reasonable bounds
+
+            # Avoid division by zero
+            if vega_val == 0 or abs(vega_val) < 1e-10:
+                return None
+
+            # Newton-Raphson update (correct formula)
+            sigma = sigma - diff / vega_val  # Not (sigma - diff) / vega
+
+            # Keep sigma positive and reasonable
+            if sigma <= 0:
+                sigma = 0.01
+            elif sigma > 5.0:  # Prevent explosion
+                sigma = 5.0
+
+        return None  # Failed to converge
+
 
 
     def _calculate_all_implied_vols(self, symbol, expiry):
@@ -262,15 +295,86 @@ class CalibrationService:
         Processes entire option chain for one expiry
         Calls _calculate_implied_vol for each contract
         Filters out invalid/illiquid options
-        Returns dictionary of strike → implied vol
+        Returns dictionary of (strike, type) → implied vol
         Caches results for performance
         Used by calibration methods
         """
-        pass
+
+        # Implied Volatility Dict
+        ivs = {}
+
+        options = self.option_chains[symbol][expiry]
+        spot_price = self.spot_prices[symbol]
+
+        tte = self._calculate_time_to_maturity(expiry)
+
+        # Determine proper risk-free rate (tte is a number, not a string)
+        if tte <= 1/12:  # 1 month in years
+            rf_rate = self.risk_free_rate["1m"]
+        elif tte <= 3/12:  # 3 months in years
+            rf_rate = self.risk_free_rate["3m"]
+        else:
+            rf_rate = self.risk_free_rate["1y"]
+
+        # Calculate dividend yield once
+        div_yield = self._calculate_dividend_yield(symbol)
+
+        # Iterating through the options
+        for option in options["calls"]:
+            iv_value = self._calculate_implied_vol(
+                option["mid"],
+                spot_price,
+                option["strike"],
+                rf_rate,
+                tte,
+                True,  # is_call
+                div_yield
+            )
+
+            # Validating implied volatility
+            validation = self._validate_implied_vol(
+                iv_value, spot_price, option["strike"],
+                rf_rate, tte, True,
+                option["mid"], div_yield
+            )
+
+            if iv_value is not None and validation:
+                ivs[(option["strike"], 'call')] = iv_value  # Key: (strike, 'call')
+
+        for option in options["puts"]:
+            iv_value = self._calculate_implied_vol(
+                option["mid"],
+                spot_price,
+                option["strike"],
+                rf_rate,
+                tte,
+                False,  # is_call
+                div_yield
+            )
+
+            # validating implied volatility
+            validation = self._validate_implied_vol(
+                iv_value, spot_price, option["strike"],
+                rf_rate, tte, False,
+                option["mid"], div_yield
+            )
+
+            if iv_value is not None and validation:
+                ivs[(option["strike"], 'put')] = iv_value  # Key: (strike, 'put')
+
+        # Initialize cache if needed
+        if symbol not in self.iv_cache:
+            self.iv_cache[symbol] = {}
+
+        # Cache results for performance
+        self.iv_cache[symbol][expiry] = ivs
+
+        # return dictionary
+        return ivs
 
 
 
-    def _validate_implied_vol(self, iv, S, K, option_price):
+    def _validate_implied_vol(self, iv, S, K, r, T, is_call, option_price, q=0):
         """
         Checks if calculated IV makes sense
         Validates against put-call parity
@@ -279,7 +383,22 @@ class CalibrationService:
         Returns boolean validity flag
         Prevents bad data from corrupting calibration
         """
-        pass
+        # Check IV exists and is in reasonable range
+        if iv is None or iv <= 0.01 or iv >= 3.0:
+            return False
+
+        # Create option dict for arbitrage bounds check
+        option = {'mid': option_price}
+        if not self._check_arbitrage_bounds(option, S, K, r, T, is_call, q):
+            return False
+
+        # Check vega is significant
+        vega_val = vega(S, K, r, q, iv, T, is_call)
+        if vega_val < 0.01:  # Changed from 0.09
+            return False
+
+        return True
+
 
 
     # Data Extraction Methods
@@ -306,7 +425,7 @@ class CalibrationService:
         Limits to reasonable strike range
         Returns filtered list sorted by moneyness
         """
-        pass
+        valid_options = []
 
 
 
@@ -682,6 +801,35 @@ class CalibrationService:
         annual_vol = daily_vol * np.sqrt(252)
 
         return annual_vol
+
+
+
+    def _calculate_dividend_yield(self, symbol, lookback_days=365):
+        """
+        Calculate annualized dividend yield from historical data
+
+        Parameters:
+        - symbol: ticker symbol
+        - lookback_days: period to calculate yield over (default 1 year)
+
+        Returns:
+        - Annualized dividend yield (q)
+        """
+        symbol_data = self.historical_data[symbol]
+        dates = sorted(symbol_data.keys())[-lookback_days:]
+
+        # Sum all dividends paid in the period
+        total_dividends = sum(symbol_data[date]["Dividends"] for date in dates)
+
+        # Get average price over the period
+        avg_price = np.mean([symbol_data[date]["Close"] for date in dates])
+
+        # Annualize the yield
+        days_in_period = len(dates)
+        annual_dividend = total_dividends * (365 / days_in_period)
+        dividend_yield = annual_dividend / avg_price
+
+        return dividend_yield
 
 
     # Persistent Methods
