@@ -426,6 +426,36 @@ class CalibrationService:
         Returns filtered list sorted by moneyness
         """
         valid_options = []
+        for option in options_list:
+            if not self._validate_option_data(option):
+                continue
+
+
+            elif option.get("openInterest", 0) < 100:
+                continue
+
+
+            elif option.get("volume", 0) < 10 and option.get("openInterest", 0) < 500:
+                continue
+
+
+            ratio = option["strike"] / S
+            if ratio > 3:
+                continue
+
+            if 0.98 <= ratio <= 1.02:
+                valid_options.insert(0, option)
+                continue
+
+            valid_options.append(option)
+
+        # Sort by moneyness (strike relative to spot) for better organization
+        # ATM options already at front, but sort the rest
+        atm_count = sum(1 for opt in valid_options if 0.98 <= opt["strike"]/S <= 1.02)
+        rest = valid_options[atm_count:]
+        rest.sort(key=lambda opt: abs(opt["strike"] / S - 1.0))  # Sort by distance from ATM
+
+        return valid_options[:atm_count] + rest
 
 
 
