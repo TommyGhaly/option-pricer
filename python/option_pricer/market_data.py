@@ -564,7 +564,7 @@ class MarketDataService:
                     'bid': row.get('bid'),
                     'ask': row.get('ask'),
                     'mid': (row.get('bid', 0) + row.get('ask', 0)) / 2 if row.get('bid') and row.get('ask') else None,
-                    'volume': row.get('volume'),
+                    'volume': row.get('volume', 0),
                     'openInterest': row.get('openInterest'),
                     'impliedVolatility': row.get('impliedVolatility'),
                     'type': option_type,

@@ -412,8 +412,53 @@ class CalibrationService:
         Returns structured calibration-ready dataset
         Returns None if insufficient data
         """
-        pass
+        try:
+            S = self.spot_prices[symbol]
+            T = self._calculate_time_to_maturity(expiry)
 
+            # Determine risk-free rate based on time to maturity
+            if T <= 1/12:
+                r = self.risk_free_rate["1m"]
+            elif T <= 1/4:
+                r = self.risk_free_rate["3m"]
+            else:
+                r = self.risk_free_rate["1y"]
+
+            q = self._calculate_dividend_yield(symbol)
+
+            # Get option chains and filter
+            option_chain = self.option_chains[symbol][expiry]
+
+            # Filter calls and puts separately
+            filtered_calls = self._filter_options_for_calibration(
+                option_chain.get("calls", []), S
+            )
+            filtered_puts = self._filter_options_for_calibration(
+                option_chain.get("puts", []), S
+            )
+
+            # Calculate implied volatilities
+            ivs = self._calculate_all_implied_vols(symbol, expiry)
+
+            # Check if we have sufficient data
+            if len(ivs) < 5:  # Need at least 5 data points for calibration
+                return None
+
+            calibration_data = {
+                "S": S,
+                "r": r,
+                "q": q,
+                "T": T,
+                "calls": filtered_calls,
+                "puts": filtered_puts,
+                "ivs": ivs
+            }
+
+            return calibration_data
+
+        except (KeyError, ValueError, TypeError) as e:
+            print(f"Error extracting calibration data for {symbol} {expiry}: {e}")
+            return None
 
 
     def _filter_options_for_calibration(self, options_list, S):
@@ -485,8 +530,22 @@ class CalibrationService:
         Calculates and stores RMSE
         Returns None if calibration fails
         """
-        pass
+        try:
+            # Extraction
+            S = calibration_data['S']
+            r = calibration_data['r']
+            q = calibration_data['q']
+            T = calibration_data['T']
 
+            strike = calibration_data['strike']
+            ivs = calibration_data['ivs']
+
+            # Calculating forward price
+            fp = self._calculate_forward_price(S, r, T, q,)
+
+        except Exception as e:
+            print(f'Failed to calibrate SABR. Code exited with exception: {e}')
+            return None
 
 
     def _prepare_sabr_market_data(self, calibration_data):
@@ -498,8 +557,48 @@ class CalibrationService:
         Handles both calls and puts
         Returns properly formatted input
         """
-        pass
+        S = calibration_data["S"]
+        ivs = calibration_data["ivs"]
 
+        # Extract (strike, iv) pairs from the ivs dict
+        # ivs has keys like (strike, 'call') or (strike, 'put')
+        market_data = []
+
+        for (strike, option_type), iv in ivs.items():
+            market_data.append({
+                'strike': strike,
+                'iv': iv,
+                'moneyness': strike / S,
+                'log_moneyness': np.log(strike / S),
+                'type': option_type
+            })
+
+        # Sort by moneyness for stability
+        market_data.sort(key=lambda x: x['moneyness'])
+
+        # Limit to reasonable number of points (SABR typically uses 10-30)
+        max_points = 30
+        if len(market_data) > max_points:
+            # Keep ATM options and evenly space the rest
+            atm_data = [d for d in market_data if 0.95 <= d['moneyness'] <= 1.05]
+            otm_data = [d for d in market_data if d['moneyness'] < 0.95 or d['moneyness'] > 1.05]
+
+            # Sample OTM points evenly
+            step = max(1, len(otm_data) // (max_points - len(atm_data)))
+            otm_sampled = otm_data[::step]
+
+            market_data = sorted(atm_data + otm_sampled, key=lambda x: x['moneyness'])
+
+        # Format for C++ function (typically wants arrays)
+        strikes = np.array([d['strike'] for d in market_data])
+        ivs_array = np.array([d['iv'] for d in market_data])
+
+        return {
+            'strikes': strikes,
+            'ivs': ivs_array,
+            'spot': S,
+            'full_data': market_data  # Keep full info for debugging
+        }
 
 
     def _validate_sabr_parameters(self, alpha, beta, rho, nu):
@@ -545,7 +644,62 @@ class CalibrationService:
         Used to accept/reject calibration
         Stores for monitoring
         """
-        pass
+        alpha, beta, rho, nu  = params
+        S = market_data["spot"]
+        T = market_data["T"]
+        strikes = market_data["strikes"]
+        market_ivs = market_data["ivs"]
+
+        model_ivs = []
+
+        for strike in strikes:
+            try:
+
+                # Call your C++ SABR IV function
+                sabr_iv = sabr_implied_vol(S, strike, T, alpha, beta, rho, nu)
+                model_ivs.append(sabr_iv)
+
+
+            except Exception as e:
+                # If SABR calculation fails, return poor quality
+                print(f"SABR IV calculation failed for strike {strike}: {e}")
+                return {
+                    'rmse': float('inf'),
+                    'max_error': float('inf'),
+                    'mean_error': float('inf'),
+                    'quality': 'failed'
+                }
+
+        model_ivs = np.array(model_ivs)
+        market_ivs = np.array(market_ivs)
+
+        # Calculate residuals
+        residuals = model_ivs - market_ivs
+
+        # Calculate quality metrics
+        rmse = np.sqrt(np.mean(residuals ** 2))
+        max_error = np.max(np.abs(residuals))
+        mean_error = np.mean(np.abs(residuals))
+
+        # Determine quality grade
+        if rmse < 0.01:
+            quality = 'excellent'
+        elif rmse < 0.02:
+            quality = 'good'
+        elif rmse < 0.05:
+            quality = 'acceptable'
+        else:
+            quality = 'poor'
+
+        return {
+            'rmse': rmse,
+            'max_error': max_error,
+            'mean_error': mean_error,
+            'residuals': residuals,
+            'model_ivs': model_ivs,
+            'quality': quality,
+            'num_points': len(strikes)
+        }
 
 
     # Heston Calibration Methods
@@ -573,9 +727,52 @@ class CalibrationService:
         Returns scalar error metric
         Includes regularization penalties
         """
-        pass
+        kappa, theta, sigma, rho, v0 = params
 
+        # Validate parameters first
+        if not self._validate_heston_parameters(kappa, theta, sigma, rho, v0):
+            return 1e10  # Return huge penalty if invalid parameters
 
+        S = market_data["spot"]
+        T = market_data["T"]
+        r = market_data["r"]
+        q = market_data["q"]
+        strikes = market_data["strikes"]
+        market_prices = market_data["market_prices"]  # Need actual market prices
+        option_types = market_data["option_types"]  # 'call' or 'put' for each
+
+        squared_errors = []
+
+        for i, strike in enumerate(strikes):
+            try:
+                # Get market price
+                market_price = market_prices[i]
+                is_call = (option_types[i] == 'call')
+
+                # Calculate Heston model price
+                heston_price = heston_model(S, strike, r, q, T, kappa, theta, sigma, rho, v0, is_call)
+
+                # Calculate squared error
+                error = (heston_price - market_price) ** 2
+                squared_errors.append(error)
+
+            except Exception as e:
+                # If pricing fails, add large penalty
+                print(f"Heston pricing failed for strike {strike}: {e}")
+                squared_errors.append(1e6)
+
+        # Sum of squared errors (SSE)
+        sse = np.sum(squared_errors)
+
+        # Add regularization to prevent extreme parameters
+        # Penalize parameters far from typical values
+        regularization = 0.0
+        regularization += 0.1 * (kappa - 2.0) ** 2  # Prefer kappa near 2
+        regularization += 0.1 * (theta - 0.04) ** 2  # Prefer theta near 4%
+        regularization += 0.1 * (sigma - 0.3) ** 2   # Prefer sigma near 0.3
+
+        # Total objective (minimize this)
+        return sse + regularization
 
     def _validate_heston_parameters(self, kappa, theta, sigma, rho, v0):
         """
@@ -639,14 +836,67 @@ class CalibrationService:
 
 
     def _interpolate_volatility(self, surface, K, T):
+            """
+            Bilinear interpolation on vol surface
+            Handles strikes between grid points
+            Handles times between grid points
+            Returns interpolated implied vol
+            Used for pricing at arbitrary strikes/expiries
+            """
+            strikes = surface['strikes']
+            expiries = surface['expiries']
+            vols = surface['volatilities']  # 2D array: vols[expiry_idx][strike_idx]
+
+            # Handle edge cases - extrapolation
+            if T <= expiries[0]:
+                T_idx = 0
+                T_weight = 0.0
+                use_time_interp = False
+            elif T >= expiries[-1]:
+                T_idx = len(expiries) - 2
+                T_weight = 1.0
+                use_time_interp = False
+            else:
+                # Find surrounding expiries
+                T_idx = np.searchsorted(expiries, T) - 1
+                T_lower, T_upper = expiries[T_idx], expiries[T_idx + 1]
+                T_weight = (T - T_lower) / (T_upper - T_lower)
+                use_time_interp = True
+
+            # Interpolate at lower expiry
+            vol_lower = self._interpolate_strike(strikes, vols[T_idx], K)
+
+            if not use_time_interp:
+                return vol_lower
+
+            # Interpolate at upper expiry
+            vol_upper = self._interpolate_strike(strikes, vols[T_idx + 1], K)
+
+            # Linear interpolation across time
+            return vol_lower * (1 - T_weight) + vol_upper * T_weight
+
+
+
+
+    def _interpolate_strike(self, strikes, vols_at_expiry, K):
         """
-        Bilinear interpolation on vol surface
-        Handles strikes between grid points
-        Handles times between grid points
-        Returns interpolated implied vol
-        Used for pricing at arbitrary strikes/expiries
+        Linear interpolation across strikes for a single expiry
         """
-        pass
+        if K <= strikes[0]:
+            return vols_at_expiry[0]  # Flat extrapolation
+        elif K >= strikes[-1]:
+            return vols_at_expiry[-1]  # Flat extrapolation
+
+        # Find surrounding strikes
+        K_idx = np.searchsorted(strikes, K) - 1
+        K_lower, K_upper = strikes[K_idx], strikes[K_idx + 1]
+        vol_lower, vol_upper = vols_at_expiry[K_idx], vols_at_expiry[K_idx + 1]
+
+        # Linear interpolation
+        K_weight = (K - K_lower) / (K_upper - K_lower)
+        return vol_lower * (1 - K_weight) + vol_upper * K_weight
+
+
 
 
     # Main Calibration Loop Methods
