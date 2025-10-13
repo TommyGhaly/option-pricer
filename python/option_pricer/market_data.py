@@ -14,6 +14,7 @@ from typing import Optional, Dict, Any
 import os
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import math
 
 #service architecture for fetching and storing market data accessible across modules but not directly dependent on other modules
 
@@ -563,9 +564,10 @@ class MarketDataService:
                     'lastPrice': row.get('lastPrice'),
                     'bid': row.get('bid'),
                     'ask': row.get('ask'),
-                    'mid': (row.get('bid', 0) + row.get('ask', 0)) / 2 if row.get('bid') and row.get('ask') else None,
-                    'volume': row.get('volume', 0),
-                    'openInterest': row.get('openInterest'),
+                    'mid': (row.get('bid', 0) + row.get('ask', 0)) / 2 if row.get('bid') and row.get('ask') else 0,
+                    'volume': row.get('volume', 0)
+                        if isinstance(row.get('volume'), (int, float)) and not math.isnan(row.get('volume'))
+                        else 0,                    'openInterest': row.get('openInterest'),
                     'impliedVolatility': row.get('impliedVolatility'),
                     'type': option_type,
                     'last_updated': dt.datetime.now().timestamp()

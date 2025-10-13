@@ -10,6 +10,7 @@ import datetime as dt
 import math
 import numpy as np
 import json
+from scipy.optimize import minimize
 
 # retrieve api key from FRED website
 fred = Fred(api_key=os.environ["FRED_API_KEY"])
@@ -532,20 +533,57 @@ class CalibrationService:
         """
         try:
             # Extraction
-            S = calibration_data['S']
+            market_data = self._prepare_sabr_market_data(calibration_data)
+            S = market_data['strike']
             r = calibration_data['r']
             q = calibration_data['q']
-            T = calibration_data['T']
-
-            strike = calibration_data['strike']
-            ivs = calibration_data['ivs']
+            T = self._calculate_time_to_maturity(expiry)
+            ivs = market_data['ivs']
 
             # Calculating forward price
-            fp = self._calculate_forward_price(S, r, T, q,)
+            fp = self._calculate_forward_price(S, r, T, q)
+            alpha, beta, rho, nu = sabr_calibrate(ivs, fp, T, 0.5)
+            params = (alpha, beta, rho, nu)
+
+            if not self._validate_sabr_parameters(alpha, beta, rho, nu):
+                print(f"SABR calibration rejected for {symbol} {expiry}: Invalid parameters")
+                return None
+
+            quality = self._calculate_sabr_fit_quality(params, market_data)
+
+            # Quality-based acceptance/rejection using RMSE
+            if not self._accept_calibration(quality['rmse'], T, symbol, expiry):
+                return None
+
+            return params
 
         except Exception as e:
             print(f'Failed to calibrate SABR. Code exited with exception: {e}')
             return None
+
+
+
+    def _accept_calibration(self, rmse, T, symbol, expiry):
+        """
+        Accept or reject calibration based on RMSE
+        Different thresholds for different expiries
+        """
+        # Time-dependent thresholds
+        if T < 0.25:  # Short-dated: expect tight fit
+            threshold = 0.02  # 2% vol error
+        elif T < 1.0:  # Medium-dated
+            threshold = 0.03  # 3% vol error
+        else:  # Long-dated: more tolerance
+            threshold = 0.05  # 5% vol error
+
+        if rmse > threshold:
+            print(f"SABR calibration rejected for {symbol} {expiry}: "
+                  f"RMSE {rmse:.4f} exceeds threshold {threshold:.4f} (T={T:.2f})")
+            return False
+
+        return True
+
+
 
 
     def _prepare_sabr_market_data(self, calibration_data):
@@ -714,7 +752,97 @@ class CalibrationService:
         More computationally expensive than SABR
         Typically only for priority symbols
         """
-        pass
+        S = calibration_data['S']
+        K = calibration_data['K']  # Array of strikes across all expiries
+        T = calibration_data['T']  # Array of maturities
+        r = calibration_data['r']
+        q = calibration_data['q']
+        market_prices = calibration_data['prices']  # Market option prices
+        option_types = calibration_data['types']  # 'call' or 'put' for each
+
+        # Initial parameter guesses
+        v0 = self._get_historical_volatility(symbol) ** 2  # Variance not vol
+        kappa = 2.0  # Mean reversion speed
+        theta = v0  # Long-term variance (start at current)
+        sigma = 0.3  # Vol-of-vol
+        rho = -0.5  # Stock-vol correlation (leverage effect)
+
+        # Bundle initial params
+        initial_params = np.array([kappa, theta, sigma, rho, v0])
+
+        # Parameter bounds (ensures valid Heston parameters)
+        bounds = [
+            (0.1, 10.0),   # kappa: mean reversion speed
+            (0.01, 1.0),   # theta: long-term variance
+            (0.01, 2.0),   # sigma: vol-of-vol
+            (-0.99, 0.99), # rho: correlation
+            (0.01, 1.0)    # v0: initial variance
+        ]
+
+        try:
+            # Optimize using scipy
+            result = minimize(
+                self._heston_objective_function,
+                initial_params,
+                args=(S, K, T, r, q, market_prices, option_types),
+                method='L-BFGS-B',  # Handles bounds well
+                bounds=bounds,
+                options={'maxiter': 500, 'ftol': 1e-9}
+            )
+
+            if not result.success:
+                print(f"Heston optimization failed for {symbol}: {result.message}")
+                return None
+
+            optimized_params = result.x
+            kappa_opt, theta_opt, sigma_opt, rho_opt, v0_opt = optimized_params
+
+            # Validate parameters
+            if not self._validate_heston_parameters(kappa_opt, theta_opt, sigma_opt, rho_opt, v0_opt):
+                print(f"Heston calibration rejected for {symbol}: Invalid parameters")
+                return None
+
+            # Calculate fit quality
+            quality = self._calculate_heston_fit_quality(
+                optimized_params, S, K, T, r, q, market_prices, option_types
+            )
+
+            # Accept/reject based on quality
+            if not self._accept_heston_calibration(quality['rmse'], symbol):
+                return None
+
+            return tuple(optimized_params)
+
+        except Exception as e:
+            print(f"Heston calibration failed for {symbol}: {e}")
+            return None
+
+
+
+
+    def _estimate_long_term_variance(self, market_ivs, T, K, S):
+        """
+        Estimate theta from long-dated ATM options
+        """
+        # Find longest maturity ATM options
+        long_dated_mask = T > 0.5  # Options > 6 months
+
+        if not np.any(long_dated_mask):
+            # Fallback: use overall ATM average
+            atm_mask = np.abs(K - S) / S < 0.05  # Within 5% of spot
+            return np.mean(market_ivs[atm_mask]) ** 2 if np.any(atm_mask) else 0.04
+
+        # Get ATM IVs for long-dated options
+        long_dated_ivs = market_ivs[long_dated_mask]
+        long_dated_K = K[long_dated_mask]
+
+        atm_mask = np.abs(long_dated_K - S) / S < 0.05
+
+        if np.any(atm_mask):
+            atm_iv = np.mean(long_dated_ivs[atm_mask])
+            return atm_iv ** 2  # Convert to variance
+
+        return 0.04  # Default 20% vol
 
 
 
