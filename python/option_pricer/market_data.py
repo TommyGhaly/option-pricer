@@ -562,19 +562,30 @@ class MarketDataService:
                     'contractSymbol': row.get('contractSymbol'),
                     'strike': row.get('strike'),
                     'lastPrice': row.get('lastPrice'),
-                    'bid': row.get('bid'),
-                    'ask': row.get('ask'),
-                    'mid': (row.get('bid', 0) + row.get('ask', 0)) / 2 if row.get('bid') and row.get('ask') else 0,
-                    'volume': row.get('volume', 0)
-                        if isinstance(row.get('volume'), (int, float)) and not math.isnan(row.get('volume'))
-                        else 0,                    'openInterest': row.get('openInterest'),
-                    'impliedVolatility': row.get('impliedVolatility'),
+                    'bid': row.get('bid') if self._not_NaN(row.get('bid')) else 0,
+                    'ask': row.get('ask') if self._not_NaN(row.get('ask')) else 0,
+                    'mid': (row.get('bid', 0) + row.get('ask', 0)) / 2 if self._not_NaN(row.get('bid')) and self._not_NaN(row.get('ask')) else 0,
+                    'volume': row.get('volume', 0) if self._not_NaN(row.get('volume')) else 0,
+                    'openInterest': row.get('openInterest') if self._not_NaN(row.get('openInterest')) else 0,
+                    'impliedVolatility': row.get('impliedVolatility') if self._not_NaN(row.get('impliedVolatility')) else 0,
                     'type': option_type,
                     'last_updated': dt.datetime.now().timestamp()
                 })
             except Exception as e:
+                print(f'problem extracting data. Code failed with exception {e}')
                 continue
         return processed
+
+    def _not_NaN(self, value):
+        """
+        Determins if input is valid
+        """
+        if not value:
+            return False
+        elif math.isnan(value):
+            return False
+        else:
+            return True
 
     def _detect_spot_change(self, symbol, old_price, new_price):
         """
