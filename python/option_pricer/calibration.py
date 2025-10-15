@@ -232,17 +232,6 @@ class CalibrationService:
         self.options_chains = option_data
         self.historical_data = history_data
 
-    def _detect_significant_changes(self):
-        """
-        Compares new data to cached data
-        Identifies price moves exceeding threshold
-        Returns list of symbols needing recalibration
-        Considers both spot and option price changes
-        Implements smart triggering logic
-        Prevents excessive recalibrations
-        """
-        pass
-
 
     # Implied Volatility Calculation Methods
     def _calculate_implied_vol(self, market_price, S, K, r, T, is_call, q=0):
@@ -310,12 +299,7 @@ class CalibrationService:
         tte = self._calculate_time_to_maturity(expiry)
 
         # Determine proper risk-free rate (tte is a number, not a string)
-        if tte <= 1/12:  # 1 month in years
-            rf_rate = self.risk_free_rate["1m"]
-        elif tte <= 3/12:  # 3 months in years
-            rf_rate = self.risk_free_rate["3m"]
-        else:
-            rf_rate = self.risk_free_rate["1y"]
+        rf_rate = self._get_risk_free_rate_for_maturity(tte)
 
         # Calculate dividend yield once
         div_yield = self._calculate_dividend_yield(symbol)
@@ -418,13 +402,7 @@ class CalibrationService:
             T = self._calculate_time_to_maturity(expiry)
 
             # Determine risk-free rate based on time to maturity
-            if T <= 1/12:
-                r = self.risk_free_rate["1m"]
-            elif T <= 1/4:
-                r = self.risk_free_rate["3m"]
-            else:
-                r = self.risk_free_rate["1y"]
-
+            r = self._get_risk_free_rate_for_maturity(T)
             q = self._calculate_dividend_yield(symbol)
 
             # Get option chains and filter
@@ -938,16 +916,42 @@ class CalibrationService:
     # Local Volatility Methods
     def _calibrate_local_volatility(self, symbol):
         """
-        Constructs local volatility surface
-        Requires complete implied volatility surface
-        Uses Dupire's formula implementation
-        Calls local_volatility from C++ library
-        Returns 2D grid of local volatilities
-        Computationally intensive
-        Typically run less frequently
+        Constructs local volatility surface using Dupire's formula
+        Returns 2D grid of local volatilities σ_local(K, T)
         """
-        pass
+        surface = self._build_volatility_surface(symbol)
+        if surface is None:
+            print(f"Failed to build vol surface for {symbol}")
+            return None
 
+        try:
+            S = self.spot_prices[symbol]
+
+            # Extract grid dimensions from surface
+            K_values = sorted(set(p['K'] for p in surface))
+            T_values = sorted(set(p['T'] for p in surface))
+
+            # Compute local vol at each grid point using Dupire
+            local_vol_grid = []
+            for T in T_values:
+                for K in K_values:
+                    # Get implied vol at this point
+                    iv = self._interpolate_iv(surface, K, T)
+
+                    # Compute local vol using Dupire (you need to add this)
+                    sigma_local = self._dupire_local_vol(S, K, T, iv, surface)
+
+                    local_vol_grid.append({
+                        'K': K,
+                        'T': T,
+                        'local_vol': sigma_local
+                    })
+
+            return local_vol_grid
+
+        except Exception as e:
+            print(f"Local vol calculation failed for {symbol}: {e}")
+            return None
 
 
     def _build_volatility_surface(self, symbol):
@@ -959,7 +963,136 @@ class CalibrationService:
         Returns complete surface structure
         Required input for local vol calculation
         """
-        pass
+        option_data = self.option_chains[symbol]
+        S = self.spot_prices[symbol]
+
+        surface_points = []
+
+        for expiry, value in option_data.items():
+            T = self._calculate_time_to_maturity(expiry)
+
+            # Skip very short-dated options (< 1 day)
+            if T < 1/365:
+                continue
+
+            r = self._get_risk_free_rate_for_maturity(T)
+            q = self._calculate_dividend_yield(symbol)
+
+            # Process calls (use for K > S, OTM calls only)
+            for call in value.get("calls", []):
+                try:
+                    K = call["strike"]
+
+                    # Use OTM calls only
+                    if K <= S:
+                        continue
+
+                    # Skip if no valid price
+                    if call.get('mid') is None or call['mid'] <= 0:
+                        continue
+
+                    iv = self._calculate_implied_vol(call['mid'], S, K, r, T, True, q)
+
+                    # Validate IV
+                    if iv is None or iv < 0.01 or iv > 3.0:
+                        continue
+
+                    surface_points.append({
+                        'K': K,
+                        'T': T,
+                        'iv': iv
+                    })
+
+                except Exception as e:
+                    print(f"Error processing call option for {symbol} {expiry}: {e}")
+                    continue
+
+            # Process puts (use for K < S, OTM puts)
+            for put in value.get("puts", []):
+                try:
+                    K = put["strike"]
+
+                    # Use OTM puts only
+                    if K >= S:
+                        continue
+
+                    # Skip if no valid price
+                    if put.get('mid') is None or put['mid'] <= 0:
+                        continue
+
+                    iv = self._calculate_implied_vol(put['mid'], S, K, r, T, False, q)
+
+                    # Validate IV
+                    if iv is None or iv < 0.01 or iv > 3.0:
+                        continue
+
+                    surface_points.append({
+                        'K': K,
+                        'T': T,
+                        'iv': iv
+                    })
+
+                except Exception as e:
+                    print(f"Error processing put option for {symbol} {expiry}: {e}")
+                    continue
+
+        # Need at least some points to build surface
+        if len(surface_points) < 30:
+            print(f"Insufficient data for {symbol} surface: only {len(surface_points)} points")
+            return None
+
+        # Extract ranges from data
+        T_vals = np.array([p['T'] for p in surface_points])
+        K_vals = np.array([p['K'] for p in surface_points])
+        iv_vals = np.array([p['iv'] for p in surface_points])
+
+        min_T, max_T = T_vals.min(), T_vals.max()
+        min_K, max_K = K_vals.min(), K_vals.max()
+
+        # Grid resolution
+        n_time_steps = min(50, int(np.sqrt(len(surface_points))))
+        n_strike_steps = min(100, int(2 * np.sqrt(len(surface_points))))
+
+        # Create regular grid
+        T_grid = np.linspace(min_T, max_T, n_time_steps)
+        K_grid = np.linspace(min_K, max_K, n_strike_steps)
+        grid_T, grid_K = np.meshgrid(T_grid, K_grid)
+
+        # Interpolate with nearest neighbor for extrapolation
+        from scipy.interpolate import griddata
+
+        grid_iv = griddata(
+            (T_vals, K_vals),
+            iv_vals,
+            (grid_T, grid_K),
+            method='cubic',
+            fill_value=np.nan
+        )
+
+        # Fill NaNs using nearest neighbor
+        nan_mask = np.isnan(grid_iv)
+        if nan_mask.any():
+            grid_iv_nearest = griddata(
+                (T_vals, K_vals),
+                iv_vals,
+                (grid_T, grid_K),
+                method='nearest'
+            )
+            grid_iv[nan_mask] = grid_iv_nearest[nan_mask]
+
+        return surface_points
+
+
+    def _get_risk_free_rate_for_maturity(self, T):
+        """
+        Select appropriate risk-free rate based on maturity
+        """
+        if T <= 1/12:
+            return self.risk_free_rate["1m"]
+        elif T <= 1/4:
+            return self.risk_free_rate["3m"]
+        else:
+            return self.risk_free_rate["1y"]
 
 
 
@@ -1053,7 +1186,14 @@ class CalibrationService:
         Balances compute load
         Avoids redundant calibrations
         """
-        pass
+        for symbol in changed_symbols:
+            expiries = self.option_chains[symbol].keys()
+            for expiry in expiries:
+                for model in ['SABR', 'Heston', 'LocalVol']:
+                    if self._should_recalibrate(symbol, expiry, model):
+                        staleness = (dt.now() - self.last_calibration_time.get(symbol, dt.min)).total_seconds() / 3600
+                        priority = self._calculate_calibration_priority(symbol, expiry, model, staleness)
+                        self.calibration_queue.put((-priority, (symbol, expiry, model)))  # Negative for max-heap
 
 
 
@@ -1068,7 +1208,21 @@ class CalibrationService:
         Logs performance metrics
         Handles exceptions locally
         """
-        pass
+        with self.data_lock:
+            calibration_data = self._extract_calibration_data(symbol, expiry)
+            if calibration_data is None:
+                print(f"Insufficient data for {symbol} {expiry}, skipping calibration.")
+                return
+            if model_type == 'SABR':
+                self.calibrated_params(symbol, expiry, 'SABR') = self._calibrate_sabr(symbol, expiry, calibration_data)
+            elif model_type == 'Heston':
+                self.calibrated_params(symbol, expiry, 'Heston') = self._calibrate_heston(symbol, calibration_data)
+            elif model_type == 'LocalVol':
+                self.calibrated_params(symbol, expiry, 'LocalVol') = self._calibrate_local_volatility(symbol)
+            else:
+                print(f"Unknown model type {model_type} for {symbol} {expiry}")
+                return
+
 
 
     # Calibration Priority Methods
@@ -1082,20 +1236,81 @@ class CalibrationService:
         Stale calibrations get staleness_ratio multiplier
         Returns float priority value for queue
         """
-        pass
+        base_priority = 100.0
+
+        # Symbol importance multiplier (2x for priority symbols)
+        symbol_multiplier = 2.0 if symbol in self.priority_symbols else 1.0
+
+        # Time to expiry multiplier (higher priority for near-term)
+        T = self._calculate_time_to_maturity(expiry)
+        if T < 7/365:  # Less than 1 week
+            expiry_multiplier = 1.5
+        elif T < 30/365:  # Less than 1 month
+            expiry_multiplier = 1.3
+        elif T < 90/365:  # Less than 3 months
+            expiry_multiplier = 1.1
+        else:
+            expiry_multiplier = 1.0
+
+        # Staleness multiplier (more stale = higher priority)
+        # staleness is in hours
+        if staleness > 48:  # Over 2 days
+            staleness_multiplier = 2.0
+        elif staleness > 24:  # Over 1 day
+            staleness_multiplier = 1.5
+        elif staleness > 12:  # Over 12 hours
+            staleness_multiplier = 1.3
+        elif staleness > 6:  # Over 6 hours
+            staleness_multiplier = 1.1
+        else:
+            staleness_multiplier = 1.0
+
+        # Model type multiplier (SABR most sensitive, LocalVol least)
+        model_multipliers = {
+            'SABR': 1.2,      # Most frequent recalibration needed
+            'Heston': 1.1,    # Moderate
+            'LocalVol': 1.0   # Least frequent
+        }
+        model_multiplier = model_multipliers.get(model, 1.0)
+
+        # Calculate final priority
+        priority = (base_priority *
+                    symbol_multiplier *
+                    expiry_multiplier *
+                    staleness_multiplier *
+                    model_multiplier)
+
+        return priority
 
 
 
-    def _should_realibrate(self, symbol, expiry, model):
+    def _should_recalibrate(self, symbol, expiry, model):
         """
-        Decides if recalibration is needed
-        Checks time since last calibration
-        Checks if underlying price changed significantly
-        Considers model-specific staleness thresholds
-        Returns boolean decision
-        Prevents unnecessary compute
+        Triggers recalibration based on time or ATM vol change
         """
-        pass
+        if symbol not in self.last_calibration_time:
+            return True
+
+        last_calibrated = self.last_calibration_time[symbol]
+        now = dt.now()
+        time_diff = (now - last_calibrated).total_seconds() / 3600
+
+        # Check ATM implied vol change
+        S = self.spot_prices[symbol]
+        atm_iv = self._get_atm_iv(symbol, expiry, S)  # Get current ATM IV
+        last_atm_iv = self.last_atm_iv.get(symbol, atm_iv)
+        iv_change = abs(atm_iv - last_atm_iv) if last_atm_iv > 0 else 0
+
+        # Model-specific thresholds
+        if model == 'SABR':
+            return time_diff > 1 or iv_change > 0.02  # 1hr or 2% IV change
+        elif model == 'Heston':
+            return time_diff > 4 or iv_change > 0.03
+        elif model == 'LocalVol':
+            return time_diff > 24 or iv_change > 0.05
+        else:
+            return True
+
 
 
     # Utility and Validation Methods

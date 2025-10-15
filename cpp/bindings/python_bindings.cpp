@@ -1,5 +1,6 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/numpy.h>
+#include <pybind11/stl.h>  // ADD THIS for automatic STL conversions
 #include "../include/models.h"
 #include "../include/option_pricer.h"
 
@@ -7,6 +8,13 @@ namespace py = pybind11;
 
 PYBIND11_MODULE(option_pricer, m) {
     m.doc() = "Option Pricing Module using C++ and pybind11";
+
+    // Define SurfacePoint structure for local volatility
+    py::class_<SurfacePoint>(m, "SurfacePoint")
+        .def(py::init<>())
+        .def_readwrite("K", &SurfacePoint::K)
+        .def_readwrite("T", &SurfacePoint::T)
+        .def_readwrite("iv", &SurfacePoint::iv);
 
     // Black-Scholes functions
     m.def("black_scholes", &black_scholes, "Calculate European option price using Black-Scholes formula",
@@ -59,13 +67,50 @@ PYBIND11_MODULE(option_pricer, m) {
           py::arg("S"), py::arg("K"), py::arg("r"), py::arg("q"), py::arg("sigma"),
           py::arg("lambda"), py::arg("mu_j"), py::arg("sigma_j"), py::arg("T"), py::arg("is_call"));
 
-    // Local Volatility Model functions
-    m.def("european_local_vol_fdm", &european_local_vol_fdm, "Price European option using Local Volatility model with FDM",
+    // Local Volatility Model functions - UPDATED WITH LAMBDA WRAPPERS
+    m.def("european_local_vol_fdm",
+          [](double S0, double K, double r, double q, double T,
+             py::list py_surface, bool is_call, int N_S, int N_T) {
+
+              // Convert Python list of dicts to C++ vector
+              std::vector<SurfacePoint> iv_surface;
+              for (auto item : py_surface) {
+                  auto dict = item.cast<py::dict>();
+                  SurfacePoint pt;
+                  pt.K = dict["K"].cast<double>();
+                  pt.T = dict["T"].cast<double>();
+                  pt.iv = dict["iv"].cast<double>();
+                  iv_surface.push_back(pt);
+              }
+
+              return european_local_vol_fdm(S0, K, r, q, T, iv_surface, is_call, N_S, N_T);
+          },
+          "Price European option using Local Volatility model with FDM",
           py::arg("S0"), py::arg("K"), py::arg("r"), py::arg("q"), py::arg("T"),
-          py::arg("implied_vol"), py::arg("is_call"), py::arg("N_S") = 200, py::arg("N_T") = 100);
-    m.def("american_local_vol_fdm", &american_local_vol_fdm, "Price American option using Local Volatility model with FDM",
+          py::arg("iv_surface"), py::arg("is_call"),
+          py::arg("N_S") = 200, py::arg("N_T") = 100);
+
+    m.def("american_local_vol_fdm",
+          [](double S0, double K, double r, double q, double T,
+             py::list py_surface, bool is_call, int N_S, int N_T) {
+
+              // Convert Python list of dicts to C++ vector
+              std::vector<SurfacePoint> iv_surface;
+              for (auto item : py_surface) {
+                  auto dict = item.cast<py::dict>();
+                  SurfacePoint pt;
+                  pt.K = dict["K"].cast<double>();
+                  pt.T = dict["T"].cast<double>();
+                  pt.iv = dict["iv"].cast<double>();
+                  iv_surface.push_back(pt);
+              }
+
+              return american_local_vol_fdm(S0, K, r, q, T, iv_surface, is_call, N_S, N_T);
+          },
+          "Price American option using Local Volatility model with FDM",
           py::arg("S0"), py::arg("K"), py::arg("r"), py::arg("q"), py::arg("T"),
-          py::arg("implied_vol"), py::arg("is_call"), py::arg("N_S") = 200, py::arg("N_T") = 100);
+          py::arg("iv_surface"), py::arg("is_call"),
+          py::arg("N_S") = 200, py::arg("N_T") = 100);
 
     // SABR Model functions
     m.def("SABRImpliedVol", &SABRImpliedVol, "Calculate SABR implied volatility",

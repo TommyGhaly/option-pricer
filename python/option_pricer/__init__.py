@@ -157,7 +157,7 @@ def jump_diffusion(S, K, r, q, sigma, T, lambda_, mu_j, sigma_j, simulations, is
     """
     return _option_pricer.jump_diffusion(S, K, r, q, sigma, T, lambda_, mu_j, sigma_j, simulations, is_call)
 
-def local_volatility(S, K, r, q, T, is_call, american=True):
+def local_volatility(S, K, r, q, T, is_call, iv_surface, american=True):
     """
     Calculate option price using local volatility model with FDM
 
@@ -165,14 +165,17 @@ def local_volatility(S, K, r, q, T, is_call, american=True):
     S: Spot price
     K: Strike price
     r: Risk-free rate
+    q: Dividend yield
     T: Time to maturity
     is_call: True for call, False for put
+    iv_surface: List of dicts with 'K', 'T', 'iv' from _build_volatility_surface()
     american: True for American, False for European
     """
     if american:
-        return _option_pricer.american_local_vol_fdm(S, K, r, q, T, is_call)
+        return _option_pricer.american_local_vol_fdm(S, K, r, q, T, iv_surface, is_call)
     else:
-        return _option_pricer.european_local_vol_fdm(S, K, r, q, T, is_call)
+        return _option_pricer.european_local_vol_fdm(S, K, r, q, T, iv_surface, is_call)
+
 
 # SABR Model Functions
 def sabr_implied_vol(S, K, r, T, alpha, beta, rho, nu):
