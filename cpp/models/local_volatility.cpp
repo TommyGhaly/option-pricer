@@ -5,6 +5,37 @@
 #include <vector>
 #include <algorithm>
 
+
+// 2D interpolation for IV surface
+double interpolate_surface(const std::vector<SurfacePoint>& surface, double S, double T) {
+    if (surface.empty()) {
+        return 0.2;  // Default fallback
+    }
+
+    // Find nearby points and do simple weighted average
+    double total_weight = 0.0;
+    double weighted_sum = 0.0;
+
+    for (const auto& point : surface) {
+        // Distance metric in (K, T) space
+        double dist = std::sqrt(std::pow(point.K - S, 2) + std::pow(point.T - T, 2) * 100);
+
+        if (dist < 1e-6) {
+            return point.iv;  // Exact match
+        }
+
+        double weight = 1.0 / (dist + 1e-6);
+        weighted_sum += weight * point.iv;
+        total_weight += weight;
+    }
+
+    if (total_weight > 0) {
+        return weighted_sum / total_weight;
+    }
+
+    return 0.2;  // Fallback
+}
+
 // Numerical derivatives for Dupire formula
 double dC_dT(double S, double K, double r, double q, double sigma, double T, bool is_call, double dt) {
     double price_plus = black_scholes(S, K, r, q, T + dt, sigma, is_call);
@@ -27,24 +58,28 @@ double d2C_dK2(double S, double K, double r, double q, double sigma, double T, b
 
 // Calculate local volatility at a single point
 double local_volatility_point(double S, double K, double r, double q, double sigma, double T, bool is_call) {
-    double dt = 0.001;
-    double dk = 0.01 * K;  // 1% of strike
+    if (T < 1e-6) {
+        return sigma;  // At maturity, return implied vol
+    }
+
+    double dt = std::min(0.001, T * 0.1);
+    double dk = 0.01 * K;
 
     double dC_dT_val = dC_dT(S, K, r, q, sigma, T, is_call, dt);
     double dC_dK_val = dC_dK(S, K, r, q, sigma, T, is_call, dk);
     double d2C_dK2_val = d2C_dK2(S, K, r, q, sigma, T, is_call, dk);
 
-    double numerator = dC_dT_val + r * K * dC_dK_val;
+    double numerator = dC_dT_val + (r - q) * K * dC_dK_val + q * black_scholes(S, K, r, q, T, sigma, is_call);
     double denominator = 0.5 * K * K * d2C_dK2_val;
 
     // Avoid division by zero or negative values
-    if (denominator <= 1e-10) {
-        return sigma;  // Return implied vol as fallback
+    if (std::abs(denominator) < 1e-10) {
+        return sigma;
     }
 
     double local_var = numerator / denominator;
     if (local_var <= 0) {
-        return sigma;  // Return implied vol as fallback
+        return sigma;
     }
 
     return std::sqrt(local_var);
@@ -105,8 +140,9 @@ double interpolate(const std::vector<double>& x_values,
 
 // Base FDM solver for local volatility model
 double local_vol_fdm_base(double S0, double K, double r, double q, double T,
-                         double implied_vol, bool is_call, bool is_american,
-                         int N_S = 200, int N_T = 100) {
+                         const std::vector<SurfacePoint>& iv_surface,
+                         bool is_call, bool is_american,
+                         int N_S, int N_T) {
 
     // Grid parameters
     double S_max = 3.0 * K;
@@ -135,14 +171,15 @@ double local_vol_fdm_base(double S0, double K, double r, double q, double T,
     // Backward time stepping
     for (int j = N_T - 1; j >= 0; j--) {
         double t = j * dt;
+        double time_to_maturity = T - t;
 
         // Boundary conditions
         if (is_call) {
-            V[0][j] = 0.0;  // S = 0
-            V[N_S][j] = S_max - K * std::exp(-r * (T - t));  // S = S_max
+            V[0][j] = 0.0;
+            V[N_S][j] = S_max - K * std::exp(-r * time_to_maturity);
         } else {
-            V[0][j] = K * std::exp(-r * (T - t));  // S = 0 for put
-            V[N_S][j] = 0.0;  // S = S_max for put
+            V[0][j] = K * std::exp(-r * time_to_maturity);
+            V[N_S][j] = 0.0;
         }
 
         // Setup tridiagonal system for interior points
@@ -150,8 +187,12 @@ double local_vol_fdm_base(double S0, double K, double r, double q, double T,
         std::vector<double> a(n-1), b(n), c(n-1), d(n);
 
         for (int i = 1; i < N_S; i++) {
-            // For now, use implied vol directly
-            double sigma = implied_vol;
+            // CRITICAL FIX: Get implied vol from surface, then compute local vol
+            double implied_vol = interpolate_surface(iv_surface, S[i], time_to_maturity);
+            double sigma = local_volatility_point(S[i], S[i], r, q, implied_vol, time_to_maturity, is_call);
+
+            // Ensure stability
+            sigma = std::max(0.01, std::min(sigma, 3.0));
             double sigma2 = sigma * sigma;
 
             // Finite difference coefficients (implicit scheme)
@@ -174,13 +215,17 @@ double local_vol_fdm_base(double S0, double K, double r, double q, double T,
 
         // Adjust for boundary conditions
         if (n > 0) {
-            double sigma_1 = implied_vol;
+            double implied_vol_1 = interpolate_surface(iv_surface, S[1], time_to_maturity);
+            double sigma_1 = local_volatility_point(S[1], S[1], r, q, implied_vol_1, time_to_maturity, is_call);
+            sigma_1 = std::max(0.01, std::min(sigma_1, 3.0));
             double sigma2_1 = sigma_1 * sigma_1;
             double alpha_1 = 0.5 * dt * ((r - q) * S[1] / dS - sigma2_1 * S[1] * S[1] / (dS * dS));
             d[0] += alpha_1 * V[0][j];
 
             if (n > 1) {
-                double sigma_n = implied_vol;
+                double implied_vol_n = interpolate_surface(iv_surface, S[N_S-1], time_to_maturity);
+                double sigma_n = local_volatility_point(S[N_S-1], S[N_S-1], r, q, implied_vol_n, time_to_maturity, is_call);
+                sigma_n = std::max(0.01, std::min(sigma_n, 3.0));
                 double sigma2_n = sigma_n * sigma_n;
                 double gamma_n = -0.5 * dt * ((r - q) * S[N_S-1] / dS + sigma2_n * S[N_S-1] * S[N_S-1] / (dS * dS));
                 d[n-1] -= gamma_n * V[N_S][j];
@@ -213,14 +258,14 @@ double local_vol_fdm_base(double S0, double K, double r, double q, double T,
 
 // European option with local volatility
 double european_local_vol_fdm(double S0, double K, double r, double q, double T,
-                             double implied_vol, bool is_call,
-                             int N_S = 200, int N_T = 100) {
-    return local_vol_fdm_base(S0, K, r, q, T, implied_vol, is_call, false, N_S, N_T);
+                             const std::vector<SurfacePoint>& iv_surface, bool is_call,
+                             int N_S, int N_T) {
+    return local_vol_fdm_base(S0, K, r, q, T, iv_surface, is_call, false, N_S, N_T);
 }
 
 // American option with local volatility
 double american_local_vol_fdm(double S0, double K, double r, double q, double T,
-                             double implied_vol, bool is_call,
-                             int N_S = 200, int N_T = 100) {
-    return local_vol_fdm_base(S0, K, r, q, T, implied_vol, is_call, true, N_S, N_T);
+                             const std::vector<SurfacePoint>& iv_surface, bool is_call,
+                             int N_S, int N_T) {
+    return local_vol_fdm_base(S0, K, r, q, T, iv_surface, is_call, true, N_S, N_T);
 }

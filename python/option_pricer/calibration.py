@@ -310,12 +310,7 @@ class CalibrationService:
         tte = self._calculate_time_to_maturity(expiry)
 
         # Determine proper risk-free rate (tte is a number, not a string)
-        if tte <= 1/12:  # 1 month in years
-            rf_rate = self.risk_free_rate["1m"]
-        elif tte <= 3/12:  # 3 months in years
-            rf_rate = self.risk_free_rate["3m"]
-        else:
-            rf_rate = self.risk_free_rate["1y"]
+        rf_rate = self._get_risk_free_rate_for_maturity(tte)
 
         # Calculate dividend yield once
         div_yield = self._calculate_dividend_yield(symbol)
@@ -418,13 +413,7 @@ class CalibrationService:
             T = self._calculate_time_to_maturity(expiry)
 
             # Determine risk-free rate based on time to maturity
-            if T <= 1/12:
-                r = self.risk_free_rate["1m"]
-            elif T <= 1/4:
-                r = self.risk_free_rate["3m"]
-            else:
-                r = self.risk_free_rate["1y"]
-
+            r = self._get_risk_free_rate_for_maturity(T)
             q = self._calculate_dividend_yield(symbol)
 
             # Get option chains and filter
@@ -946,7 +935,11 @@ class CalibrationService:
         Computationally intensive
         Typically run less frequently
         """
-        pass
+        surface = self._build_volatility_surface(symbol)
+        if surface is None:
+            print(f"Failed to build vol surface for {symbol}")
+            return None
+
 
 
 
@@ -959,7 +952,136 @@ class CalibrationService:
         Returns complete surface structure
         Required input for local vol calculation
         """
-        pass
+        option_data = self.option_chains[symbol]
+        S = self.spot_prices[symbol]
+
+        surface_points = []
+
+        for expiry, value in option_data.items():
+            T = self._calculate_time_to_maturity(expiry)
+
+            # Skip very short-dated options (< 1 day)
+            if T < 1/365:
+                continue
+
+            r = self._get_risk_free_rate_for_maturity(T)
+            q = self._calculate_dividend_yield(symbol)
+
+            # Process calls (use for K > S, OTM calls only)
+            for call in value.get("calls", []):
+                try:
+                    K = call["strike"]
+
+                    # Use OTM calls only
+                    if K <= S:
+                        continue
+
+                    # Skip if no valid price
+                    if call.get('mid') is None or call['mid'] <= 0:
+                        continue
+
+                    iv = self._calculate_implied_vol(call['mid'], S, K, r, T, True, q)
+
+                    # Validate IV
+                    if iv is None or iv < 0.01 or iv > 3.0:
+                        continue
+
+                    surface_points.append({
+                        'K': K,
+                        'T': T,
+                        'iv': iv
+                    })
+
+                except Exception as e:
+                    print(f"Error processing call option for {symbol} {expiry}: {e}")
+                    continue
+
+            # Process puts (use for K < S, OTM puts)
+            for put in value.get("puts", []):
+                try:
+                    K = put["strike"]
+
+                    # Use OTM puts only
+                    if K >= S:
+                        continue
+
+                    # Skip if no valid price
+                    if put.get('mid') is None or put['mid'] <= 0:
+                        continue
+
+                    iv = self._calculate_implied_vol(put['mid'], S, K, r, T, False, q)
+
+                    # Validate IV
+                    if iv is None or iv < 0.01 or iv > 3.0:
+                        continue
+
+                    surface_points.append({
+                        'K': K,
+                        'T': T,
+                        'iv': iv
+                    })
+
+                except Exception as e:
+                    print(f"Error processing put option for {symbol} {expiry}: {e}")
+                    continue
+
+        # Need at least some points to build surface
+        if len(surface_points) < 30:
+            print(f"Insufficient data for {symbol} surface: only {len(surface_points)} points")
+            return None
+
+        # Extract ranges from data
+        T_vals = np.array([p['T'] for p in surface_points])
+        K_vals = np.array([p['K'] for p in surface_points])
+        iv_vals = np.array([p['iv'] for p in surface_points])
+
+        min_T, max_T = T_vals.min(), T_vals.max()
+        min_K, max_K = K_vals.min(), K_vals.max()
+
+        # Grid resolution
+        n_time_steps = min(50, int(np.sqrt(len(surface_points))))
+        n_strike_steps = min(100, int(2 * np.sqrt(len(surface_points))))
+
+        # Create regular grid
+        T_grid = np.linspace(min_T, max_T, n_time_steps)
+        K_grid = np.linspace(min_K, max_K, n_strike_steps)
+        grid_T, grid_K = np.meshgrid(T_grid, K_grid)
+
+        # Interpolate with nearest neighbor for extrapolation
+        from scipy.interpolate import griddata
+
+        grid_iv = griddata(
+            (T_vals, K_vals),
+            iv_vals,
+            (grid_T, grid_K),
+            method='cubic',
+            fill_value=np.nan
+        )
+
+        # Fill NaNs using nearest neighbor
+        nan_mask = np.isnan(grid_iv)
+        if nan_mask.any():
+            grid_iv_nearest = griddata(
+                (T_vals, K_vals),
+                iv_vals,
+                (grid_T, grid_K),
+                method='nearest'
+            )
+            grid_iv[nan_mask] = grid_iv_nearest[nan_mask]
+
+        return surface_points
+
+
+    def _get_risk_free_rate_for_maturity(self, T):
+        """
+        Select appropriate risk-free rate based on maturity
+        """
+        if T <= 1/12:
+            return self.risk_free_rate["1m"]
+        elif T <= 1/4:
+            return self.risk_free_rate["3m"]
+        else:
+            return self.risk_free_rate["1y"]
 
 
 
