@@ -8,16 +8,15 @@ import time
 import pytz
 import pandas_market_calendars as mcal
 import logging
-import time
 import traceback
 from typing import Optional, Dict, Any
 import os
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import math
+import tempfile
 
-#service architecture for fetching and storing market data accessible across modules but not directly dependent on other modules
-
+# Service architecture for fetching and storing market data accessible across modules but not directly dependent on other modules
 
 # ETFs for market data
 SPY = 'SPY'  # S&P 500 ETF
@@ -26,7 +25,6 @@ IWM = 'IWM'  # Russell 2000 ETF
 DIA = 'DIA'  # Dow Jones Industrial Average ETF
 
 # High-Volume Single Stocks
-
 AAPL = 'AAPL'  # Apple Inc.
 MSFT = 'MSFT'  # Microsoft Corporation
 AMZN = 'AMZN'  # Amazon.com Inc.
@@ -45,27 +43,23 @@ VIX = '^VIX'  # CBOE Volatility Index
 UVXY = 'UVXY'  # ProShares Ultra VIX Short-Term Futures ETF
 SVXY = 'SVXY'  # ProShares Short VIX Short-Term Futures ETF
 
-
 # Sector Representative ETFs
 XLF = 'XLF'  # Financial Select Sector SPDR Fund
 XLE = 'XLE'  # Energy Select Sector SPDR Fund
 XLK = "XLK"  # Technology Select Sector SPDR Fund
 GLD = 'GLD'  # SPDR Gold Shares
 
-#Time interval API Calls
-SPOTS = 5 # 5 Second intervals
-ATMS = 30 # 30 Second intervals
-OTM = 60 * 5 # 5 Minute intervals
-HISTORY = 60 * 60 # 1 Hour intervals or on demand
+# Time interval API Calls
+SPOTS = 5  # 5 Second intervals
+ATMS = 30  # 30 Second intervals
+OTM = 60 * 5  # 5 Minute intervals
+HISTORY = 60 * 60  # 1 Hour intervals or on demand
 
 
 class MarketDataService:
-
-
     # Core Methods
 
-    # Initialize with list of symbols and optional config
-    def __init__(self, symbols, config = None):
+    def __init__(self, symbols, config=None):
         # Data Storage variables
         self.symbols = symbols
         self.spot_data = {}
@@ -77,9 +71,10 @@ class MarketDataService:
             'history': {}
         }
 
-        #Threading control variables
+        # Threading control variables
         self.running = False
         self.data_lock = th.Lock()
+        self.file_lock = th.Lock()  # Add file lock for coordinating file writes
         self.spot_thread = th.Thread()
         self.option_threads = []
         self.option_update_queue = qu()
@@ -90,10 +85,17 @@ class MarketDataService:
         # Initialize error count
         self._error_count = 0
 
+        # Track which data needs saving
+        self._dirty_flags = {
+            'spot': False,
+            'options': False,
+            'history': False
+        }
+
         # File saving configuration
         self.save_to_file = config.get('save_to_file', True) if config else True
         self.data_directory = config.get('data_directory', 'market_data') if config else 'market_data'
-        self.save_interval = config.get('save_interval', 1) if config else 1  # Save every 1 second
+        self.save_interval = config.get('save_interval', 5) if config else 5  # Increased to 5 seconds for better performance
         self.file_format = config.get('file_format', 'json') if config else 'json'
 
         # Create data directory if it doesn't exist
@@ -105,6 +107,31 @@ class MarketDataService:
         self.option_file = os.path.join(self.data_directory, 'option_chains.json')
         self.history_file = os.path.join(self.data_directory, 'historical_data.json')
         self.metadata_file = os.path.join(self.data_directory, 'metadata.json')
+
+        # Load any existing data
+        if self.save_to_file:
+            self._load_existing_data()
+
+    def _load_existing_data(self):
+        """Load previously saved data if available"""
+        try:
+            loaded_data = self.load_saved_data()
+
+            if 'spot' in loaded_data:
+                self.spot_data = loaded_data['spot']
+                logging.info(f"Loaded {len(self.spot_data)} spot prices from previous session")
+
+            if 'options' in loaded_data:
+                self.option_chain = loaded_data['options']
+                logging.info(f"Loaded option chains for {len(self.option_chain)} symbols from previous session")
+
+            if 'history' in loaded_data:
+                # Note: Historical data needs conversion back to DataFrame
+                # For now, we'll skip loading history and let it refresh
+                logging.info("Historical data found but will be refreshed")
+
+        except Exception as e:
+            logging.warning(f"Could not load existing data: {e}")
 
     def start(self) -> bool:
         """
@@ -121,7 +148,7 @@ class MarketDataService:
             self.spot_thread = th.Thread(
                 target=self._spot_price_loop,
                 name="SpotPriceUpdater",
-                daemon=True  # Dies when main program exits
+                daemon=True
             )
             self.spot_thread.start()
 
@@ -159,19 +186,21 @@ class MarketDataService:
         Cleans up resources
         Sets running flag to False
         """
+        self.running = False
+
+        # Final save of all data
+        if self.save_to_file:
+            self._save_all_data()
+
+        # Wait for threads to finish
         for thread in self.option_threads:
             if thread.is_alive():
                 thread.join(timeout=5)
-        self.running = False
-        # Could add thread.join() calls here to wait for threads to finish
-        # Could add data persistence here
 
     # Data Collection Methods
 
     def _initial_data_load(self):
-        """
-        Initial load using reliable yfinance Tickers method
-        """
+        """Initial load using reliable yfinance Tickers method"""
         print("\n" + "="*60)
         print("STARTING INITIAL DATA LOAD")
         print("="*60)
@@ -214,7 +243,7 @@ class MarketDataService:
                 successful_symbols += 1
                 print(f"  [{i+1}/{len(self.symbols)}] {symbol}: Queued {len(expiries)} expiries")
 
-                time.sleep(0.3)  # Delay between symbols
+                time.sleep(0.3)
 
             except Exception as e:
                 print(f"  [{i+1}/{len(self.symbols)}] {symbol}: Error - {e}")
@@ -241,12 +270,7 @@ class MarketDataService:
         print("="*60 + "\n")
 
     def _fetch_spot_price(self, symbol):
-        """
-        Fetches current spot data from yahoo
-        Returns dict with price, bid, ask, volume
-        Handles errors gracefully
-        Single symbol fetch
-        """
+        """Fetches current spot data from yahoo"""
         ticker_data = {}
         try:
             ticker = yf.Ticker(symbol)
@@ -291,15 +315,8 @@ class MarketDataService:
                                        'retry_delay': 1})
         return ticker_data
 
-
-
     def _fetch_option_chain(self, symbol, expiry):
-        """
-        Retrieves complete option chain
-        Returns processed calls/puts data
-        Handles missing strikes
-        Validates data quality
-        """
+        """Retrieves complete option chain"""
         try:
             option_chain = yf.Ticker(symbol).option_chain(expiry)
             options_data = {
@@ -317,13 +334,8 @@ class MarketDataService:
                                     'retry_delay': 1})
             return {'calls': [], 'puts': [], 'last_updated': None}
 
-
-
     def _batch_fetch_spots(self, symbol_list, max_retries=2):
-        """
-        Fetches spot prices using yfinance.Tickers()
-        Most reliable method for batch fetching
-        """
+        """Fetches spot prices using yfinance.Tickers()"""
         quotes = {}
 
         if not symbol_list:
@@ -333,7 +345,6 @@ class MarketDataService:
             try:
                 print(f"Fetching {len(symbol_list)} symbols using Tickers method...")
 
-                # Create a Tickers object for batch operations
                 tickers = yf.Tickers(' '.join(symbol_list))
 
                 for symbol in symbol_list:
@@ -362,7 +373,6 @@ class MarketDataService:
                             }
                             print(f"  ✓ {symbol}: ${info.get('regularMarketPrice')}")
 
-                        # Small delay between symbols to be gentle on API
                         time.sleep(0.15)
 
                     except Exception as e:
@@ -384,27 +394,18 @@ class MarketDataService:
                 if attempt < max_retries - 1:
                     time.sleep(5)
 
-        # If still no data, try fallback
-        if not quotes:
-            print("Batch method failed, using individual fallback...")
-            return self._fallback_individual_fetch(symbol_list)
-
         return quotes
-
 
     # Update Loops Methods
 
     def _spot_price_loop(self):
-        """
-        Main spot price update loop using Tickers method
-        """
+        """Main spot price update loop using Tickers method"""
         loop_count = 0
 
         while self.running:
             if self.is_market_open():
                 loop_count += 1
                 try:
-                    # Use Tickers method for updates
                     batch_data = self._batch_fetch_spots(self.symbols)
 
                     if batch_data:
@@ -424,14 +425,10 @@ class MarketDataService:
                                     self._prioritize_option_updates(symbol)
                                     price_changes += 1
 
+                            self._dirty_flags['spot'] = True
+
                         if loop_count % 12 == 0:  # Log every minute
                             print(f"Spot update: {updates} symbols updated, {price_changes} significant changes")
-
-                        if self.save_to_file:
-                            self._save_spot_data()
-                            self._save_metadata()
-                    else:
-                        print("⚠️  Spot update returned no data")
 
                 except Exception as e:
                     print(f"Error in spot price loop: {e}")
@@ -442,15 +439,8 @@ class MarketDataService:
                     print("Market closed - spot updates paused")
                 time.sleep(60)
 
-
     def _option_chain_loop(self):
-        """
-        Worker method for option updates
-        Pulls from update queue
-        Fetches and stores chain data
-        Re-queues for next update
-        Multiple instances run in parallel
-        """
+        """Worker method for option updates"""
         while self.running:
             if self.is_market_open():
                 try:
@@ -459,7 +449,6 @@ class MarketDataService:
                     now = time.time()
                     last_update = self.last_fetched['option'].get((symbol, expiry), 0)
 
-                    # Pick right interval (ATM vs OTM)
                     # Determine if near the money by comparing days to expiry
                     expiry_date = dt.datetime.strptime(expiry, "%Y-%m-%d")
                     days_to_expiry = (expiry_date - dt.datetime.now()).days
@@ -468,19 +457,14 @@ class MarketDataService:
                     interval = self.update_frequency['atm_options'] if is_near_term else self.update_frequency['otm_options']
 
                     if now - last_update >= interval:
-                        # Fetch option chain
                         chain_data = self._fetch_option_chain(symbol, expiry)
                         with self.data_lock:
                             if symbol not in self.option_chain:
                                 self.option_chain[symbol] = {}
                             self.option_chain[symbol][expiry] = chain_data
+                            self._dirty_flags['options'] = True
 
-                        # Update timestamp
                         self.last_fetched['option'][(symbol, expiry)] = now
-
-                        # Trigger immediate save for real-time monitoring
-                        if self.save_to_file:
-                            self._save_option_data()
 
                     # Always requeue for future updates
                     self.option_update_queue.put((symbol, expiry))
@@ -496,17 +480,10 @@ class MarketDataService:
                                             'max_retries': 3,
                                             'retry_delay': 1})
             else:
-                time.sleep(60)  # Sleep longer when market is closed
-
-
+                time.sleep(60)
 
     def _historical_data_loop(self):
-        """
-        Updates historical price data
-        Runs less frequently (hourly)
-        Maintains rolling window
-        Used for volatility calculations
-        """
+        """Updates historical price data"""
         while self.running:
             try:
                 if self.is_market_open():
@@ -518,14 +495,11 @@ class MarketDataService:
                         if now - last_update >= self.update_frequency['history']:
                             try:
                                 ticker = yf.Ticker(symbol)
-                                hist = ticker.history(period="1y", interval="1d")  # Could use start/end for incremental fetch
+                                hist = ticker.history(period="1y", interval="1d")
                                 with self.data_lock:
                                     self.historical_data[symbol] = hist
                                     self.last_fetched['history'][symbol] = dt.datetime.now().timestamp()
-
-                                # Trigger immediate save for real-time monitoring
-                                if self.save_to_file:
-                                    self._save_historical_data()
+                                    self._dirty_flags['history'] = True
 
                             except Exception as e:
                                 self._handle_api_error(e, {
@@ -536,9 +510,9 @@ class MarketDataService:
                                     'retry_delay': 1
                                 })
 
-                    time.sleep(60)  # Check every minute whether updates are needed
+                    time.sleep(60)
                 else:
-                    time.sleep(300)  # Sleep longer when market is closed
+                    time.sleep(300)
 
             except Exception as e:
                 self._handle_api_error(e, {'operation': '_historical_data_loop',
@@ -549,12 +523,7 @@ class MarketDataService:
     # Data Processing Methods
 
     def _process_option_data(self, chain_df, option_type):
-        """
-        Converts DataFrame to dict format
-        Extracts relevant fields
-        Handles missing/invalid data
-        Normalizes data structure
-        """
+        """Converts DataFrame to dict format"""
         processed = []
         for _, row in chain_df.iterrows():
             try:
@@ -577,9 +546,7 @@ class MarketDataService:
         return processed
 
     def _not_NaN(self, value):
-        """
-        Determins if input is valid
-        """
+        """Determines if input is valid"""
         if not value:
             return False
         elif math.isnan(value):
@@ -588,12 +555,7 @@ class MarketDataService:
             return True
 
     def _detect_spot_change(self, symbol, old_price, new_price):
-        """
-        Compares new vs. cached price
-        Calculates percentage change
-        Returns boolean for significant move
-        Triggers downstream updates
-        """
+        """Compares new vs. cached price"""
         if old_price == 0:
             return False
         if abs(new_price - old_price) / old_price > 0.01:  # 1% change
@@ -601,40 +563,28 @@ class MarketDataService:
         return False
 
     def _prioritize_option_updates(self, symbol):
-        """
-        Determines which options need updating
-        Prioritizes by moneyness and expiry
-        Adds to update queue with priority
-        Balances update load
-        """
+        """Determines which options need updating"""
         try:
             spot_price = self.spot_data.get(symbol, {}).get('price')
             if not spot_price:
-                return  # no spot data, skip
+                return
 
             ticker = yf.Ticker(symbol)
             expiries = ticker.options
 
-            # Build a list of (expiry, priority_score)
             expiry_scores = []
             for expiry in expiries:
                 try:
-                    # Time to expiry in days
                     expiry_date = dt.datetime.strptime(expiry, "%Y-%m-%d")
                     days_to_expiry = max((expiry_date - dt.datetime.now()).days, 0)
-                    expiry_score = 1 / (days_to_expiry + 1)  # sooner expiry = higher score
-
-                    # For moneyness, we could fetch the chain but that's expensive
-                    # Instead use time as proxy (near-term options are usually more important)
+                    expiry_score = 1 / (days_to_expiry + 1)
                     total_priority = expiry_score
                     expiry_scores.append((expiry, total_priority))
                 except:
                     continue
 
-            # Sort by highest priority first
             expiry_scores.sort(key=lambda x: x[1], reverse=True)
 
-            # Enqueue updates in priority order
             for expiry, _ in expiry_scores:
                 self.option_update_queue.put((symbol, expiry))
 
@@ -648,55 +598,33 @@ class MarketDataService:
     # Utility Methods
 
     def _calculate_update_priority(self, symbol, data_type):
-        """
-        Determines update urgency
-        Based on staleness and importance
-        Returns priority score
-        Used for queue ordering
-        """
+        """Determines update urgency"""
         now = time.time()
-
-        # 1. Check last update time
         last_update = self.last_fetched.get(data_type, {}).get(symbol, 0)
         staleness = now - last_update
-
-        # 2. Base priority on staleness vs threshold
         threshold = self.stale_threshold.get(data_type, 60)
-        priority = staleness / threshold  # >1 means overdue
+        priority = staleness / threshold
 
-        # 3. Boost priority for important symbols
         if symbol in self.priority_symbols:
-            priority *= 2  # double weight for key tickers
+            priority *= 2
 
-        # 4. Adjust for data type (spot updates might be more critical)
         if data_type == 'spot':
             priority *= 1.5
         elif data_type in ['atm_options', 'otm_options']:
             priority *= 1.2
         elif data_type == 'history':
-            priority *= 0.8  # less frequent
+            priority *= 0.8
 
         return priority
 
     def is_market_open(self):
-        '''
-        Checks if market is currently open
-        Adjusts update behavior
-        Considers holidays
-        Returns boolean
-        '''
+        """Checks if market is currently open"""
         return validate_market_hours()
 
     def _clean_stale_data(self):
-        """
-        Removes very old data
-        Manages memory usage
-        Runs periodically
-        Configurable retention
-        """
+        """Removes very old data"""
         now = time.time()
 
-        # Clean spot data
         for symbol in list(self.spot_data.keys()):
             last_time = self.last_fetched.get('spot', {}).get(symbol, 0)
             if now - last_time > self.stale_threshold['spot']:
@@ -704,7 +632,6 @@ class MarketDataService:
                     self.spot_data.pop(symbol, None)
                     self.last_fetched['spot'].pop(symbol, None)
 
-        # Clean option chains
         for symbol in list(self.option_chain.keys()):
             for expiry in list(self.option_chain[symbol].keys()):
                 last_time = self.option_chain[symbol][expiry].get('last_updated', 0)
@@ -714,7 +641,6 @@ class MarketDataService:
                         if not self.option_chain[symbol]:
                             self.option_chain.pop(symbol, None)
 
-        # Clean historical data
         for symbol in list(self.historical_data.keys()):
             last_time = self.last_fetched.get('history', {}).get(symbol, 0)
             if now - last_time > self.stale_threshold['history']:
@@ -723,25 +649,18 @@ class MarketDataService:
                     self.last_fetched['history'].pop(symbol, None)
 
     def _handle_api_error(self, error, context):
-        """
-        Centralized error handling
-        Logs errors appropriately
-        Implements retry logic
-        Prevents service disruption
-        """
+        """Centralized error handling"""
         operation = context.get('operation', 'Unknown operation')
         symbol = context.get('symbol', 'N/A')
         retry_count = context.get('retry_count', 0)
         max_retries = context.get('max_retries', 3)
         retry_delay = context.get('retry_delay', 1)
 
-        # Log the error
         if retry_count == 0:
             logging.warning(f"API Error in {operation} for {symbol}: {type(error).__name__}: {str(error)}")
             if not isinstance(error, (ConnectionError, TimeoutError)):
                 logging.debug(f"Traceback:\n{traceback.format_exc()}")
 
-        # Check if retryable
         retryable_errors = (ConnectionError, TimeoutError)
         is_retryable = isinstance(error, retryable_errors) or \
                     "HTTPError" in str(type(error)) or \
@@ -750,27 +669,20 @@ class MarketDataService:
                         hasattr(error.response, 'status_code') and
                         500 <= error.response.status_code < 600)
 
-        # Should we retry?
         if is_retryable and retry_count < max_retries:
-            # Exponential backoff with jitter
             delay = retry_delay * (2 ** retry_count) + (time.time() % 1)
             logging.info(f"Retrying {operation} for {symbol} in {delay:.1f}s (attempt {retry_count + 1}/{max_retries})")
             time.sleep(delay)
-
-            # Signal to caller to retry
             context['retry_count'] = retry_count + 1
             context['should_retry'] = True
             return None
 
-        # Max retries exceeded or non-retryable
         if retry_count >= max_retries:
             logging.error(f"Max retries exceeded for {operation} (symbol: {symbol})")
         else:
             logging.error(f"Non-retryable error in {operation} for {symbol}")
 
         context['should_retry'] = False
-
-        # Track error stats
         self._error_count += 1
 
         if self._error_count % 100 == 0:
@@ -779,95 +691,101 @@ class MarketDataService:
         return None
 
     def calculate_priority_score(self, symbol, staleness, volatility):
-        """
-        Determines update priority for a symbol
-        Combines staleness, recent volatility, and importance into a numeric score
-        Higher score = higher update priority
-        """
-        # Base priority from staleness (how overdue the data is)
-        threshold = self.stale_threshold.get('spot', 60)  # default threshold for spot
-        staleness_score = staleness / threshold  # >1 means data is stale
-
-        # Volatility adjustment (higher volatility = higher priority)
-        volatility_score = volatility * 2  # scale factor, can tune
-
-        # Importance boost for key symbols
+        """Determines update priority for a symbol"""
+        threshold = self.stale_threshold.get('spot', 60)
+        staleness_score = staleness / threshold
+        volatility_score = volatility * 2
         importance_score = 1.5 if symbol in self.priority_symbols else 1.0
-
-        # Combine scores
         total_score = (staleness_score + volatility_score) * importance_score
-
         return total_score
 
-    # File Saving Methods
+    # Thread-Safe File Saving Methods
+
+    def _atomic_json_save(self, filepath, data):
+        """
+        Atomically saves JSON data to file using temp file + rename pattern.
+        This prevents corruption from partial writes or concurrent access.
+        """
+        directory = os.path.dirname(filepath)
+        with tempfile.NamedTemporaryFile(mode='w',
+                                         delete=False,
+                                         dir=directory,
+                                         prefix='.tmp_',
+                                         suffix='.json') as temp_file:
+            try:
+                json.dump(data, temp_file, indent=2, default=str)
+                temp_file.flush()
+                os.fsync(temp_file.fileno())  # Force write to disk
+                temp_path = temp_file.name
+            except Exception as e:
+                temp_path = temp_file.name
+                os.unlink(temp_path)  # Clean up temp file on error
+                raise e
+
+        try:
+            # On Windows, need to remove target first
+            if os.name == 'nt' and os.path.exists(filepath):
+                os.remove(filepath)
+            os.rename(temp_path, filepath)
+        except Exception as e:
+            if os.path.exists(temp_path):
+                os.unlink(temp_path)
+            raise e
 
     def _file_save_loop(self):
-        """
-        Continuously saves data to files
-        Runs on separate thread
-        Saves spot, options, and history data
-        Updates metadata with timestamps
-        """
+        """Continuously saves data to files"""
         while self.running:
             try:
                 self._save_all_data()
                 time.sleep(self.save_interval)
             except Exception as e:
                 logging.error(f"Error in file save loop: {e}")
-                time.sleep(5)  # Wait longer on error
+                time.sleep(5)
 
     def _save_all_data(self):
-        """
-        Saves all data types to their respective files
-        Thread-safe data access
-        Handles file I/O errors
-        Updates metadata
-        """
+        """Saves all data types to their respective files"""
         try:
-            # Save spot data
-            self._save_spot_data()
+            # Only save data that has changed
+            if self._dirty_flags.get('spot', False):
+                self._save_spot_data()
+                self._dirty_flags['spot'] = False
 
-            # Save option chains
-            self._save_option_data()
+            if self._dirty_flags.get('options', False):
+                self._save_option_data()
+                self._dirty_flags['options'] = False
 
-            # Save historical data
-            self._save_historical_data()
+            if self._dirty_flags.get('history', False):
+                self._save_historical_data()
+                self._dirty_flags['history'] = False
 
-            # Save metadata
+            # Always save metadata
             self._save_metadata()
 
         except Exception as e:
             logging.error(f"Error saving market data files: {e}")
 
     def _save_spot_data(self):
-        """
-        Saves spot price data to JSON file
-        Includes all price, volume, and metadata
-        Human-readable formatting
-        """
+        """Thread-safe save of spot price data"""
         try:
             with self.data_lock:
                 spot_copy = self.spot_data.copy()
 
-            # Convert timestamps to readable format
             for symbol, data in spot_copy.items():
                 if 'timestamp' in data and data['timestamp']:
-                    data['timestamp_readable'] = dt.datetime.fromtimestamp(data['timestamp']).isoformat()
+                    data['timestamp_readable'] = dt.datetime.fromtimestamp(
+                        data['timestamp']).isoformat()
                 if 'market_time' in data and data['market_time']:
-                    data['market_time_readable'] = dt.datetime.fromtimestamp(data['market_time']).isoformat()
+                    data['market_time_readable'] = dt.datetime.fromtimestamp(
+                        data['market_time']).isoformat()
 
-            with open(self.spot_file, 'w') as f:
-                json.dump(spot_copy, f, indent=2, default=str)
+            with self.file_lock:
+                self._atomic_json_save(self.spot_file, spot_copy)
 
         except Exception as e:
             logging.error(f"Error saving spot data: {e}")
 
     def _save_option_data(self):
-        """
-        Saves option chain data to JSON file
-        Organized by symbol and expiry
-        Includes calls and puts
-        """
+        """Thread-safe save of option chain data"""
         try:
             with self.data_lock:
                 option_copy = {}
@@ -878,84 +796,106 @@ class MarketDataService:
                             'calls': data.get('calls', []),
                             'puts': data.get('puts', []),
                             'last_updated': data.get('last_updated'),
-                            'last_updated_readable': dt.datetime.fromtimestamp(data.get('last_updated', 0)).isoformat() if data.get('last_updated') else None
+                            'last_updated_readable': dt.datetime.fromtimestamp(
+                                data.get('last_updated', 0)).isoformat()
+                                if data.get('last_updated') else None
                         }
 
-            with open(self.option_file, 'w') as f:
-                json.dump(option_copy, f, indent=2, default=str)
+            with self.file_lock:
+                self._atomic_json_save(self.option_file, option_copy)
 
         except Exception as e:
             logging.error(f"Error saving option data: {e}")
 
     def _save_historical_data(self):
-        """
-        Saves historical price data to JSON file
-        Converts DataFrame to dict format
-        Preserves date indices
-        """
+        """Thread-safe save of historical price data"""
         try:
             with self.data_lock:
                 history_copy = {}
                 for symbol, df in self.historical_data.items():
                     if not df.empty:
-                        # Convert DataFrame to dict with date strings
                         df_dict = df.to_dict('index')
-                        # Convert datetime index to strings
                         history_copy[symbol] = {
                             str(date): values for date, values in df_dict.items()
                         }
                     else:
                         history_copy[symbol] = {}
 
-            with open(self.history_file, 'w') as f:
-                json.dump(history_copy, f, indent=2, default=str)
+            with self.file_lock:
+                self._atomic_json_save(self.history_file, history_copy)
 
         except Exception as e:
             logging.error(f"Error saving historical data: {e}")
 
     def _save_metadata(self):
-        """
-        Saves metadata about the data collection
-        Includes update timestamps and statistics
-        Helps monitor service health
-        """
+        """Thread-safe save of metadata"""
         try:
-            metadata = {
-                'last_save_time': dt.datetime.now().isoformat(),
-                'symbols_tracked': self.symbols,
-                'priority_symbols': self.priority_symbols,
-                'service_running': self.running,
-                'total_errors': self._error_count,
-                'last_fetched_times': {
-                    'spot': {symbol: dt.datetime.fromtimestamp(ts).isoformat()
-                            for symbol, ts in self.last_fetched['spot'].items()},
-                    'options': {f"{symbol}_{expiry}": dt.datetime.fromtimestamp(ts).isoformat()
-                               for (symbol, expiry), ts in self.last_fetched['option'].items()},
-                    'history': {symbol: dt.datetime.fromtimestamp(ts).isoformat()
-                               for symbol, ts in self.last_fetched['history'].items()}
-                },
-                'data_counts': {
-                    'spot_symbols': len(self.spot_data),
-                    'option_symbols': len(self.option_chain),
-                    'total_option_chains': sum(len(expiries) for expiries in self.option_chain.values()),
-                    'history_symbols': len(self.historical_data)
-                },
-                'update_frequencies': self.update_frequency,
-                'market_open': self.is_market_open()
-            }
+            with self.data_lock:
+                metadata = {
+                    'last_save_time': dt.datetime.now().isoformat(),
+                    'symbols_tracked': self.symbols,
+                    'priority_symbols': self.priority_symbols,
+                    'service_running': self.running,
+                    'total_errors': self._error_count,
+                    'last_fetched_times': {
+                        'spot': {symbol: dt.datetime.fromtimestamp(ts).isoformat()
+                                for symbol, ts in self.last_fetched['spot'].items()},
+                        'options': {f"{symbol}_{expiry}": dt.datetime.fromtimestamp(ts).isoformat()
+                                   for (symbol, expiry), ts in self.last_fetched['option'].items()},
+                        'history': {symbol: dt.datetime.fromtimestamp(ts).isoformat()
+                                   for symbol, ts in self.last_fetched['history'].items()}
+                    },
+                    'data_counts': {
+                        'spot_symbols': len(self.spot_data),
+                        'option_symbols': len(self.option_chain),
+                        'total_option_chains': sum(len(expiries) for expiries in self.option_chain.values()),
+                        'history_symbols': len(self.historical_data)
+                    },
+                    'update_frequencies': self.update_frequency,
+                    'market_open': self.is_market_open()
+                }
 
-            with open(self.metadata_file, 'w') as f:
-                json.dump(metadata, f, indent=2)
+            with self.file_lock:
+                self._atomic_json_save(self.metadata_file, metadata)
 
         except Exception as e:
             logging.error(f"Error saving metadata: {e}")
 
+    def load_saved_data(self):
+        """Safely loads previously saved data from JSON files"""
+        loaded_data = {}
+
+        if os.path.exists(self.spot_file):
+            try:
+                with self.file_lock:
+                    with open(self.spot_file, 'r') as f:
+                        loaded_data['spot'] = json.load(f)
+                logging.info(f"Loaded {len(loaded_data['spot'])} spot prices from file")
+            except Exception as e:
+                logging.error(f"Error loading spot data: {e}")
+
+        if os.path.exists(self.option_file):
+            try:
+                with self.file_lock:
+                    with open(self.option_file, 'r') as f:
+                        loaded_data['options'] = json.load(f)
+                logging.info(f"Loaded option data for {len(loaded_data['options'])} symbols from file")
+            except Exception as e:
+                logging.error(f"Error loading option data: {e}")
+
+        if os.path.exists(self.history_file):
+            try:
+                with self.file_lock:
+                    with open(self.history_file, 'r') as f:
+                        loaded_data['history'] = json.load(f)
+                logging.info(f"Loaded historical data for {len(loaded_data['history'])} symbols from file")
+            except Exception as e:
+                logging.error(f"Error loading historical data: {e}")
+
+        return loaded_data
+
     def get_data_files(self):
-        """
-        Returns paths to all data files
-        Useful for external monitoring
-        Can be called to find where data is saved
-        """
+        """Returns paths to all data files"""
         return {
             'spot': self.spot_file,
             'options': self.option_file,
@@ -965,13 +905,9 @@ class MarketDataService:
         }
 
     def enable_file_monitoring(self, enable=True):
-        """
-        Enable or disable file saving at runtime
-        Useful for debugging or performance tuning
-        """
+        """Enable or disable file saving at runtime"""
         self.save_to_file = enable
         if enable and hasattr(self, 'save_thread') and not self.save_thread.is_alive():
-            # Restart the save thread if it's not running
             self.save_thread = th.Thread(
                 target=self._file_save_loop,
                 name="FileSaver",
@@ -985,44 +921,27 @@ class MarketDataService:
     # Data Access Methods
 
     def get_spot_price(self, symbol):
-        """
-        Get current spot price for a symbol
-        Returns dict with price data
-        Thread-safe access
-        """
+        """Get current spot price for a symbol"""
         with self.data_lock:
             return self.spot_data.get(symbol, {}).copy()
 
     def get_option_chain(self, symbol, expiry=None):
-        """
-        Get option chain for a symbol
-        Optional expiry filter
-        Returns chain data or all expiries
-        """
+        """Get option chain for a symbol"""
         with self.data_lock:
             if symbol not in self.option_chain:
                 return {}
-
             if expiry:
                 return self.option_chain[symbol].get(expiry, {}).copy()
             else:
                 return self.option_chain[symbol].copy()
 
     def get_all_spot_prices(self):
-        """
-        Get all current spot prices
-        Returns dict of all symbols
-        Thread-safe copy
-        """
+        """Get all current spot prices"""
         with self.data_lock:
             return self.spot_data.copy()
 
     def get_data_summary(self):
-        """
-        Get summary of all available data
-        Includes counts and last update times
-        Useful for monitoring
-        """
+        """Get summary of all available data"""
         with self.data_lock:
             summary = {
                 'spot_symbols': list(self.spot_data.keys()),
@@ -1045,30 +964,20 @@ class MarketDataService:
 # Helper Functions
 
 def validate_market_hours():
-    """
-    - Checks if market is open
-    - Considers timezone
-    - Handles holidays
-    - Returns boolean
-    """
-    # Get current time in ET (market timezone)
+    """Checks if market is open"""
     et_tz = pytz.timezone('America/New_York')
     now_et = dt.datetime.now(et_tz)
 
-    # Quick check: weekends are always closed
     if now_et.weekday() >= 5:  # Saturday = 5, Sunday = 6
         return False
 
-    # Get NYSE calendar for holiday checking
     nyse = mcal.get_calendar('NYSE')
     today_str = now_et.strftime('%Y-%m-%d')
 
-    # Check if today is a trading day
     schedule = nyse.schedule(start_date=today_str, end_date=today_str)
     if schedule.empty:
-        return False  # Holiday
+        return False
 
-    # Check if within market hours (9:30 AM - 4:00 PM ET)
     market_open = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
     market_close = now_et.replace(hour=16, minute=0, second=0, microsecond=0)
 
@@ -1085,18 +994,18 @@ if __name__ == "__main__":
 
     # Define symbols to track
     symbols = [
-                SPY, QQQ, IWM, DIA,
-                AAPL, MSFT, AMZN, GOOGL, TSLA, NVDA, META,
-                JPM, BAC, GS,
-                VIX, UVXY, SVXY,
-                XLF, XLE, XLK, GLD
-            ]
+        SPY, QQQ, IWM, DIA,
+        AAPL, MSFT, AMZN, GOOGL, TSLA, NVDA, META,
+        JPM, BAC, GS,
+        VIX, UVXY, SVXY,
+        XLF, XLE, XLK, GLD
+    ]
 
     # Configuration with file saving options
     config = {
         'save_to_file': True,
         'data_directory': 'market_data_realtime',
-        'save_interval': 1,  # Save every 1 second
+        'save_interval': 5,  # Increased to 5 seconds for better performance
         'file_format': 'json'
     }
 
@@ -1115,20 +1024,16 @@ if __name__ == "__main__":
         print("Press Ctrl+C to stop...")
 
         try:
-            # Example of programmatic data access
             time.sleep(10)  # Wait for initial data
 
-            # Get spot price for AAPL
             aapl_spot = service.get_spot_price('AAPL')
             if aapl_spot:
                 print(f"\nAAPL Spot: ${aapl_spot.get('price', 'N/A')}")
 
-            # Get summary
             summary = service.get_data_summary()
             print(f"\nTracking {len(summary['spot_symbols'])} symbols")
             print(f"Market is {'open' if summary['market_open'] else 'closed'}")
 
-            # Keep running
             while True:
                 time.sleep(1)
 
