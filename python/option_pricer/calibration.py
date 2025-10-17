@@ -11,6 +11,7 @@ import math
 import numpy as np
 import json
 from scipy.optimize import minimize
+import time
 
 # retrieve api key from FRED website
 fred = Fred(api_key=os.environ["FRED_API_KEY"])
@@ -99,8 +100,59 @@ class CalibrationService:
         Returns when service is ready
         Provides initial parameters immediately
         """
-        pass
+        # Initial data load
+        self._load_market_data()
 
+        # Calculate initial implied volatilities for all symbols
+        for symbol in self.symbols:
+            if symbol not in self.option_chains:
+                print(f"Warning: {symbol} not found in option chains")
+                continue
+
+            for expiry in self.option_chains[symbol].keys():
+                self._calculate_all_implied_vols(symbol, expiry)
+
+        # Run initial calibration pass for priority symbols
+        initial_calibrations = []
+        for symbol in self.priority_symbols:
+            if symbol not in self.option_chains:
+                continue
+
+            # Get first few expiries for initial calibration
+            expiries = sorted(list(self.option_chains[symbol].keys()))[:3]
+
+            for expiry in expiries:
+                # Schedule initial SABR calibrations (fastest model)
+                self.calibration_queue.put((-1000, (symbol, expiry, 'SABR')))
+
+        # Process initial calibrations synchronously for immediate availability
+        while not self.calibration_queue.empty():
+            try:
+                _, (symbol, expiry, model) = self.calibration_queue.get_nowait()
+                self._worker_calibration_task(symbol, expiry, model)
+            except qu.Empty:
+                break
+            except Exception as e:
+                print(f"Initial calibration failed: {e}")
+                continue
+
+        # Set running flag
+        self.running = True
+
+        # Start the main calibration loop thread
+        self.calibration_thread = th.Thread(
+            target=self._calibration_loop,
+            name="CalibrationLoop",
+            daemon=True
+        )
+        self.calibration_thread.start()
+
+        # ThreadPoolExecutor is already created in __init__ as self.calibration_workers
+        # No need to create additional threads
+
+        print(f"Calibration service started with {len(self.symbols)} symbols")
+        print(f"Worker pool: {self.calibration_workers._max_workers} threads")
+        print(f"Initial calibrations completed for {len(self.calibrated_params)} symbols")
 
 
     def stop(self):
@@ -112,37 +164,57 @@ class CalibrationService:
         Cleans up resources
         Waits for in-progress calibrations
         """
-        pass
+        print("Stopping calibration service...")
+
+        # Set flag to stop loop
+        self.running = False
+
+        # Wait for calibration thread to finish
+        if self.calibration_thread.is_alive():
+            self.calibration_thread.join(timeout=self.calibration_interval + 1)
+
+        # Shutdown worker pool gracefully
+        self.calibration_workers.shutdown(wait=True, timeout=30)
+
+        # Save final calibrations
+        if self.save_calibrations:
+            self._save_calibrations()
+
+        # Clear the queue
+        while not self.calibration_queue.empty():
+            try:
+                self.calibration_queue.get_nowait()
+            except qu.Empty:
+                break
+
+        print(f"Calibration service stopped. Saved {len(self.calibrated_params)} calibrations")
 
 
     # File Monitoring Methods
-    def _check_file_data(self, symbol):
+    def _check_file_updates(self):
         """
         Checks if new market data available since last calibration
-        Compares metadata timestamps vs last calibration time
-        Returns True if data is newer
-        Avoids redundant calibrations
+        Compares file modification time vs last calibration time
+        Returns True if any market data file is newer
         """
-        # Load metadata
-        metadata_path = os.path.join(self.data_directory, self.file_paths["meta"])
-        with open(metadata_path, 'r') as f:
-            metadata = json.load(f)
+        # Check both spot and options file modification times
+        spot_path = os.path.join(self.data_directory, self.file_paths["spot"])
+        options_path = os.path.join(self.data_directory, self.file_paths["options"])
 
-        # Get last data update time
-        last_spot_update = metadata['last_fetched_times']['spot'].get(symbol)
-        last_options_update = metadata['last_fetched_times']['options'].get(f"{symbol}_<expiry>")
+        # Get file modification times
+        spot_mtime = dt.fromtimestamp(os.path.getmtime(spot_path))
+        options_mtime = dt.fromtimestamp(os.path.getmtime(options_path))
 
-        # Compare to last calibration time
-        if self.last_calibration_time[symbol] is None:
-            return True  # Never calibrated
+        # Get most recent update across all files
+        last_data_update = max(spot_mtime, options_mtime)
 
-        # Parse timestamps and compare
-        last_data_time = max(
-            dt.fromisoformat(last_spot_update),
-            dt.fromisoformat(last_options_update)
-        )
+        # If never calibrated, return True
+        if self.last_calibration_time is None:
+            return True
 
-        return last_data_time > self.last_calibration_time[symbol]
+        # Check if data is newer than last calibration
+        return last_data_update > self.last_calibration_time
+
 
 
     def _load_market_data(self):
@@ -1161,7 +1233,7 @@ class CalibrationService:
 
 
     # Main Calibration Loop Methods
-    def _calibration_loop():
+    def _calibration_loop(self):
         """
         Main thread that runs continuously
         Checks for file updates every interval
@@ -1173,7 +1245,51 @@ class CalibrationService:
         Saves results periodically
         Handles errors without crashing
         """
-        pass
+        while self.running:
+            try:
+                if self._check_file_updates():
+                    self._load_market_data()
+                    self._schedule_calibration(self.symbols)
+
+                    # Process priority queue with worker pool
+                    futures = []
+
+                    # Submit tasks up to worker pool capacity
+                    while not self.calibration_queue.empty() and len(futures) < 8:  # max_workers=8
+                        try:
+                            _, (symbol, expiry, model) = self.calibration_queue.get_nowait()
+
+                            # Submit to ThreadPoolExecutor
+                            future = self.calibration_workers.submit(
+                                self._worker_calibration_task,
+                                symbol, expiry, model
+                            )
+                            futures.append(future)
+
+                        except qu.Empty:
+                            break
+
+                    # Wait for completions using as_completed
+                    for future in as_completed(futures):
+                        try:
+                            future.result(timeout=60)  # 1 min timeout per calibration
+                        except Exception as e:
+                            print(f"Calibration task failed: {e}")
+                            continue
+
+                    # Save calibrations after batch completes
+                    if self.save_calibrations and futures:
+                        self._save_calibrations()
+
+                    # Update last calibration time
+                    self.last_calibration_time = dt.datetime.now()
+
+                time.sleep(self.calibration_interval)
+
+            except Exception as e:
+                print(f"Error in calibration loop: {e}")
+                time.sleep(self.calibration_interval)
+                continue
 
 
 
@@ -1208,21 +1324,57 @@ class CalibrationService:
         Logs performance metrics
         Handles exceptions locally
         """
-        with self.data_lock:
-            calibration_data = self._extract_calibration_data(symbol, expiry)
+        try:
+            # Extract data with lock
+            with self.data_lock:
+                calibration_data = self._extract_calibration_data(symbol, expiry)
+
             if calibration_data is None:
                 print(f"Insufficient data for {symbol} {expiry}, skipping calibration.")
                 return
+
+            # Perform calibration (outside lock for performance)
+            result = None
+            start_time = time.time()
+
             if model_type == 'SABR':
-                self.calibrated_params(symbol, expiry, 'SABR') = self._calibrate_sabr(symbol, expiry, calibration_data)
+                result = self._calibrate_sabr(symbol, expiry, calibration_data)
             elif model_type == 'Heston':
-                self.calibrated_params(symbol, expiry, 'Heston') = self._calibrate_heston(symbol, calibration_data)
+                result = self._calibrate_heston(symbol, calibration_data)
             elif model_type == 'LocalVol':
-                self.calibrated_params(symbol, expiry, 'LocalVol') = self._calibrate_local_volatility(symbol)
+                result = self._calibrate_local_volatility(symbol)
             else:
                 print(f"Unknown model type {model_type} for {symbol} {expiry}")
                 return
 
+            duration = time.time() - start_time
+
+            # Update results with lock
+            if result is not None:
+                with self.data_lock:
+                    # Initialize nested structure if needed
+                    if symbol not in self.calibrated_params:
+                        self.calibrated_params[symbol] = {}
+                    if expiry not in self.calibrated_params[symbol]:
+                        self.calibrated_params[symbol][expiry] = {}
+
+                    # Store calibration result
+                    self.calibrated_params[symbol][expiry][model_type] = result
+
+                    # Update last calibration time for this symbol
+                    if symbol not in self.last_calibration_time:
+                        self.last_calibration_time[symbol] = {}
+                    self.last_calibration_time[symbol][expiry] = dt.datetime.now()
+
+                    # Log metrics
+                    print(f"Calibrated {model_type} for {symbol} {expiry} in {duration:.2f}s")
+
+        except Exception as e:
+            print(f"Error in worker task for {symbol} {expiry} {model_type}: {e}")
+            # Track failed calibrations
+            if symbol not in self.failed_calibrations:
+                self.failed_calibrations[symbol] = {}
+            self.failed_calibrations[symbol][expiry] = dt.datetime.now()
 
 
     # Calibration Priority Methods
@@ -1288,26 +1440,62 @@ class CalibrationService:
         """
         Triggers recalibration based on time or ATM vol change
         """
+        # Check if never calibrated
         if symbol not in self.last_calibration_time:
             return True
 
-        last_calibrated = self.last_calibration_time[symbol]
-        now = dt.now()
+        if expiry not in self.last_calibration_time[symbol]:
+            return True
+
+        # Check time since last calibration
+        last_calibrated = self.last_calibration_time[symbol][expiry]
+        now = dt.datetime.now()
         time_diff = (now - last_calibrated).total_seconds() / 3600
 
-        # Check ATM implied vol change
-        S = self.spot_prices[symbol]
-        atm_iv = self._get_atm_iv(symbol, expiry, S)  # Get current ATM IV
-        last_atm_iv = self.last_atm_iv.get(symbol, atm_iv)
-        iv_change = abs(atm_iv - last_atm_iv) if last_atm_iv > 0 else 0
+        # Check if spot price changed significantly
+        spot_change = 0.0
+        if symbol in self.calibrated_params and expiry in self.calibrated_params[symbol]:
+            # Get the spot price used in last calibration (if stored)
+            last_params = self.calibrated_params[symbol][expiry].get(model)
+            if last_params and isinstance(last_params, dict) and 'spot_at_calibration' in last_params:
+                last_spot = last_params['spot_at_calibration']
+                current_spot = self.spot_prices[symbol]
+                spot_change = abs(current_spot - last_spot) / last_spot
+
+        # Alternative: Check if IV cache has changed significantly
+        iv_change = 0.0
+        if symbol in self.iv_cache and expiry in self.iv_cache[symbol]:
+            # Get current ATM IV from cache
+            current_ivs = self.iv_cache[symbol][expiry]
+            S = self.spot_prices[symbol]
+
+            # Find strikes closest to ATM
+            atm_strikes = []
+            for (strike, option_type), iv in current_ivs.items():
+                moneyness = strike / S
+                if 0.98 <= moneyness <= 1.02:  # Within 2% of ATM
+                    atm_strikes.append(iv)
+
+            if atm_strikes:
+                current_atm_iv = np.mean(atm_strikes)
+
+                # Check against last calibration's ATM IV if we stored it
+                if (symbol in self.calibrated_params and
+                    expiry in self.calibrated_params[symbol] and
+                    model in self.calibrated_params[symbol][expiry]):
+
+                    last_calib = self.calibrated_params[symbol][expiry][model]
+                    if isinstance(last_calib, dict) and 'atm_iv_at_calibration' in last_calib:
+                        last_atm_iv = last_calib['atm_iv_at_calibration']
+                        iv_change = abs(current_atm_iv - last_atm_iv)
 
         # Model-specific thresholds
         if model == 'SABR':
-            return time_diff > 1 or iv_change > 0.02  # 1hr or 2% IV change
+            return time_diff > 1 or spot_change > 0.01 or iv_change > 0.02
         elif model == 'Heston':
-            return time_diff > 4 or iv_change > 0.03
+            return time_diff > 4 or spot_change > 0.02 or iv_change > 0.03
         elif model == 'LocalVol':
-            return time_diff > 24 or iv_change > 0.05
+            return time_diff > 24 or spot_change > 0.03 or iv_change > 0.05
         else:
             return True
 
