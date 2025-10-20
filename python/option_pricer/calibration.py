@@ -342,7 +342,7 @@ class CalibrationService:
             return ivs
 
         options = self.option_chains[symbol][expiry]
-        spot_price = self.spot_prices.get(symbol, 0)
+        spot_price = self.spot_prices.get(symbol, {}).get('price', 0)
 
         if spot_price <= 0:
             return ivs
@@ -434,7 +434,8 @@ class CalibrationService:
         Returns structured calibration-ready dataset
         """
         try:
-            S = self.spot_prices.get(symbol)
+            spot_data = self.spot_prices.get(symbol, {})
+            S = spot_data.get('price', 0)
             if not S or S <= 0:
                 return None
 
@@ -467,6 +468,7 @@ class CalibrationService:
                 return None
 
             calibration_data = {
+                "symbol": symbol,
                 "S": S,
                 "r": r,
                 "q": q,
@@ -518,11 +520,425 @@ class CalibrationService:
             return S
         return S * math.exp((r - q) * T)
 
+    def _extract_market_prices(self, calibration_data):
+        """
+        Extract actual market prices from calibration data
+        """
+        market_prices = {}
+
+        # Extract call prices
+        for call in calibration_data['calls']:
+            strike = call['strike']
+            if strike not in market_prices:
+                market_prices[strike] = {}
+            market_prices[strike]['call'] = {
+                'bid': call.get('bid', 0),
+                'ask': call.get('ask', 0),
+                'mid': call.get('mid', 0),
+                'last': call.get('lastPrice', 0),
+                'volume': call.get('volume', 0),
+                'open_interest': call.get('openInterest', 0)
+            }
+
+        # Extract put prices
+        for put in calibration_data['puts']:
+            strike = put['strike']
+            if strike not in market_prices:
+                market_prices[strike] = {}
+            market_prices[strike]['put'] = {
+                'bid': put.get('bid', 0),
+                'ask': put.get('ask', 0),
+                'mid': put.get('mid', 0),
+                'last': put.get('lastPrice', 0),
+                'volume': put.get('volume', 0),
+                'open_interest': put.get('openInterest', 0)
+            }
+
+        return market_prices
+
+    # Multi-Model Calculation Methods
+    def _calculate_all_model_prices_and_greeks(self, calibration_data, primary_params, primary_model):
+        """
+        Calculate prices and Greeks for ALL models, not just the calibrated one
+        """
+        S = calibration_data['S']
+        r = calibration_data['r']
+        q = calibration_data['q']
+        T = calibration_data['T']
+
+        # Get all strikes
+        all_strikes = set()
+        for opt in calibration_data['calls'] + calibration_data['puts']:
+            all_strikes.add(opt['strike'])
+
+        results = {}
+
+        # 1. Calculate SABR prices and Greeks
+        if primary_model == 'SABR':
+            sabr_params = primary_params
+        else:
+            # Use default SABR parameters or last calibrated ones
+            sabr_params = self._get_or_estimate_sabr_params(calibration_data)
+
+        if sabr_params:
+            results['SABR'] = self._calculate_sabr_model_results(
+                sabr_params, calibration_data, all_strikes
+            )
+
+        # 2. Calculate Heston prices and Greeks
+        if primary_model == 'Heston':
+            heston_params = primary_params
+        else:
+            # Use default Heston parameters or last calibrated ones
+            heston_params = self._get_or_estimate_heston_params(calibration_data)
+
+        if heston_params:
+            results['Heston'] = self._calculate_heston_model_results(
+                heston_params, calibration_data, all_strikes
+            )
+
+        # 3. Calculate Black-Scholes prices and Greeks (using ATM IV)
+        results['BlackScholes'] = self._calculate_bs_model_results(
+            calibration_data, all_strikes
+        )
+
+        # 4. Calculate Binomial Tree prices and Greeks (American options)
+        results['Binomial'] = self._calculate_binomial_model_results(
+            calibration_data, all_strikes
+        )
+
+        # 5. Calculate Monte Carlo prices (for comparison, no Greeks)
+        results['MonteCarlo'] = self._calculate_mc_model_results(
+            calibration_data, all_strikes
+        )
+
+        return results
+
+    def _calculate_sabr_model_results(self, params, calibration_data, strikes):
+        """
+        Calculate SABR model prices and all Greeks
+        """
+        alpha, beta, rho, nu = params
+        S = calibration_data['S']
+        r = calibration_data['r']
+        q = calibration_data['q']
+        T = calibration_data['T']
+        F = self._calculate_forward_price(S, r, T, q)
+
+        results = {'prices': {}, 'greeks': {}, 'implied_vols': {}}
+
+        for strike in sorted(strikes):
+            # SABR implied volatility
+            sabr_iv = sabr_implied_vol(S, strike, r, T, alpha, beta, rho, nu)
+
+            # SABR option prices
+            call_price = sabr_option(S, strike, r, T, F, alpha, beta, rho, nu, True)
+            put_price = sabr_option(S, strike, r, T, F, alpha, beta, rho, nu, False)
+
+            # SABR Greeks
+            call_delta = sabr_delta(S, strike, r, T, F, alpha, beta, rho, nu, True)
+            call_gamma = sabr_gamma(S, strike, r, T, F, alpha, beta, rho, nu, True)
+            call_vega = sabr_vega(S, strike, r, T, F, alpha, beta, rho, nu, True)
+            call_volga = sabr_volga(S, strike, r, T, F, alpha, beta, rho, nu, True)
+            call_vanna = sabr_vanna(S, strike, r, T, F, alpha, beta, rho, nu, True)
+
+            put_delta = sabr_delta(S, strike, r, T, F, alpha, beta, rho, nu, False)
+            put_gamma = sabr_gamma(S, strike, r, T, F, alpha, beta, rho, nu, False)
+            put_vega = sabr_vega(S, strike, r, T, F, alpha, beta, rho, nu, False)
+            put_volga = sabr_volga(S, strike, r, T, F, alpha, beta, rho, nu, False)
+            put_vanna = sabr_vanna(S, strike, r, T, F, alpha, beta, rho, nu, False)
+
+            # BS Greeks for theta and rho (using SABR IV)
+            call_theta = theta(S, strike, r, q, sabr_iv, T, True)
+            call_rho = rho(S, strike, r, q, sabr_iv, T, True)
+            put_theta = theta(S, strike, r, q, sabr_iv, T, False)
+            put_rho = rho(S, strike, r, q, sabr_iv, T, False)
+
+            results['prices'][strike] = {'call': call_price, 'put': put_price}
+            results['greeks'][strike] = {
+                'call': {
+                    'delta': call_delta, 'gamma': call_gamma, 'vega': call_vega,
+                    'theta': call_theta, 'rho': call_rho,
+                    'volga': call_volga, 'vanna': call_vanna
+                },
+                'put': {
+                    'delta': put_delta, 'gamma': put_gamma, 'vega': put_vega,
+                    'theta': put_theta, 'rho': put_rho,
+                    'volga': put_volga, 'vanna': put_vanna
+                }
+            }
+            results['implied_vols'][strike] = sabr_iv
+
+        return results
+
+    def _calculate_heston_model_results(self, params, calibration_data, strikes):
+        """
+        Calculate Heston model prices and Greeks using finite differences
+        """
+        kappa, theta, sigma, rho, v0 = params
+        S = calibration_data['S']
+        r = calibration_data['r']
+        q = calibration_data['q']
+        T = calibration_data['T']
+
+        results = {'prices': {}, 'greeks': {}}
+
+        for strike in sorted(strikes):
+            # Heston prices
+            call_price = heston_model(S, strike, r, q, T, kappa, theta, sigma, rho, v0, True)
+            put_price = heston_model(S, strike, r, q, T, kappa, theta, sigma, rho, v0, False)
+
+            # Finite difference Greeks
+            h = S * 0.0001
+
+            # Delta
+            call_up = heston_model(S + h, strike, r, q, T, kappa, theta, sigma, rho, v0, True)
+            call_delta = (call_up - call_price) / h
+
+            put_up = heston_model(S + h, strike, r, q, T, kappa, theta, sigma, rho, v0, False)
+            put_delta = (put_up - put_price) / h
+
+            # Gamma
+            call_down = heston_model(S - h, strike, r, q, T, kappa, theta, sigma, rho, v0, True)
+            gamma_value = (call_up - 2*call_price + call_down) / (h**2)
+
+            # Vega (w.r.t. v0)
+            v_h = v0 * 0.01
+            call_v_up = heston_model(S, strike, r, q, T, kappa, theta, sigma, rho, v0 + v_h, True)
+            call_vega = (call_v_up - call_price) / (v_h * 100)
+
+            put_v_up = heston_model(S, strike, r, q, T, kappa, theta, sigma, rho, v0 + v_h, False)
+            put_vega = (put_v_up - put_price) / (v_h * 100)
+
+            # Theta
+            dt = 1/365
+            if T > dt:
+                call_t = heston_model(S, strike, r, q, T - dt, kappa, theta, sigma, rho, v0, True)
+                call_theta = -(call_price - call_t) / dt
+
+                put_t = heston_model(S, strike, r, q, T - dt, kappa, theta, sigma, rho, v0, False)
+                put_theta = -(put_price - put_t) / dt
+            else:
+                call_theta = put_theta = 0
+
+            # Rho
+            r_h = 0.0001
+            call_r_up = heston_model(S, strike, r + r_h, q, T, kappa, theta, sigma, rho, v0, True)
+            call_rho = (call_r_up - call_price) / r_h
+
+            put_r_up = heston_model(S, strike, r + r_h, q, T, kappa, theta, sigma, rho, v0, False)
+            put_rho = (put_r_up - put_price) / r_h
+
+            results['prices'][strike] = {'call': call_price, 'put': put_price}
+            results['greeks'][strike] = {
+                'call': {
+                    'delta': call_delta, 'gamma': gamma_value, 'vega': call_vega,
+                    'theta': call_theta, 'rho': call_rho
+                },
+                'put': {
+                    'delta': put_delta, 'gamma': gamma_value, 'vega': put_vega,
+                    'theta': put_theta, 'rho': put_rho
+                }
+            }
+
+        return results
+
+    def _calculate_bs_model_results(self, calibration_data, strikes):
+        """
+        Calculate Black-Scholes prices and Greeks using ATM implied vol
+        """
+        S = calibration_data['S']
+        r = calibration_data['r']
+        q = calibration_data['q']
+        T = calibration_data['T']
+
+        # Use ATM implied vol or historical vol
+        atm_iv = self._get_atm_implied_vol(calibration_data) or 0.25
+
+        results = {'prices': {}, 'greeks': {}, 'implied_vol': atm_iv}
+
+        for strike in sorted(strikes):
+            # BS prices
+            call_price = black_scholes(S, strike, r, q, atm_iv, T, True)
+            put_price = black_scholes(S, strike, r, q, atm_iv, T, False)
+
+            # BS Greeks
+            call_delta = delta(S, strike, r, q, atm_iv, T, True)
+            put_delta = delta(S, strike, r, q, atm_iv, T, False)
+            gamma_value = gamma(S, strike, r, q, atm_iv, T, True)
+            vega_value = vega(S, strike, r, q, atm_iv, T, True)
+            call_theta = theta(S, strike, r, q, atm_iv, T, True)
+            put_theta = theta(S, strike, r, q, atm_iv, T, False)
+            call_rho = rho(S, strike, r, q, atm_iv, T, True)
+            put_rho = rho(S, strike, r, q, atm_iv, T, False)
+
+            # Additional BS Greeks
+            vanna_value = vanna(S, strike, r, q, atm_iv, T, True)
+            charm_call = charm(S, strike, r, q, atm_iv, T, True)
+            charm_put = charm(S, strike, r, q, atm_iv, T, False)
+            vomma_value = vomma(S, strike, r, q, atm_iv, T, True)
+            veta_value = veta(S, strike, r, q, atm_iv, T, True)
+
+            results['prices'][strike] = {'call': call_price, 'put': put_price}
+            results['greeks'][strike] = {
+                'call': {
+                    'delta': call_delta, 'gamma': gamma_value, 'vega': vega_value,
+                    'theta': call_theta, 'rho': call_rho,
+                    'vanna': vanna_value, 'charm': charm_call,
+                    'vomma': vomma_value, 'veta': veta_value
+                },
+                'put': {
+                    'delta': put_delta, 'gamma': gamma_value, 'vega': vega_value,
+                    'theta': put_theta, 'rho': put_rho,
+                    'vanna': vanna_value, 'charm': charm_put,
+                    'vomma': vomma_value, 'veta': veta_value
+                }
+            }
+
+        return results
+
+    def _calculate_binomial_model_results(self, calibration_data, strikes):
+        """
+        Calculate Binomial Tree prices and Greeks (American options)
+        """
+        S = calibration_data['S']
+        r = calibration_data['r']
+        q = calibration_data['q']
+        T = calibration_data['T']
+
+        atm_iv = self._get_atm_implied_vol(calibration_data) or 0.25
+        steps = 100  # Number of tree steps
+
+        results = {'prices': {}, 'greeks': {}}
+
+        for strike in sorted(strikes):
+            # American option prices
+            call_price = binomial_tree(S, strike, r, q, atm_iv, T, steps, True, american=True)
+            put_price = binomial_tree(S, strike, r, q, atm_iv, T, steps, False, american=True)
+
+            # Greeks using finite differences
+            h = S * 0.0001
+
+            # Delta
+            call_up = binomial_tree(S + h, strike, r, q, atm_iv, T, steps, True, american=True)
+            call_delta = (call_up - call_price) / h
+
+            put_up = binomial_tree(S + h, strike, r, q, atm_iv, T, steps, False, american=True)
+            put_delta = (put_up - put_price) / h
+
+            # Gamma
+            call_down = binomial_tree(S - h, strike, r, q, atm_iv, T, steps, True, american=True)
+            gamma_value = (call_up - 2*call_price + call_down) / (h**2)
+
+            # Vega
+            sigma_h = 0.01
+            call_sigma_up = binomial_tree(S, strike, r, q, atm_iv + sigma_h, T, steps, True, american=True)
+            call_vega = (call_sigma_up - call_price) / sigma_h
+
+            put_sigma_up = binomial_tree(S, strike, r, q, atm_iv + sigma_h, T, steps, False, american=True)
+            put_vega = (put_sigma_up - put_price) / sigma_h
+
+            # Theta
+            dt = 1/365
+            if T > dt:
+                call_t = binomial_tree(S, strike, r, q, atm_iv, T - dt, steps, True, american=True)
+                call_theta = -(call_price - call_t) / dt
+
+                put_t = binomial_tree(S, strike, r, q, atm_iv, T - dt, steps, False, american=True)
+                put_theta = -(put_price - put_t) / dt
+            else:
+                call_theta = put_theta = 0
+
+            results['prices'][strike] = {'call': call_price, 'put': put_price}
+            results['greeks'][strike] = {
+                'call': {
+                    'delta': call_delta, 'gamma': gamma_value, 'vega': call_vega,
+                    'theta': call_theta
+                },
+                'put': {
+                    'delta': put_delta, 'gamma': gamma_value, 'vega': put_vega,
+                    'theta': put_theta
+                }
+            }
+
+        return results
+
+    def _calculate_mc_model_results(self, calibration_data, strikes):
+        """
+        Calculate Monte Carlo prices (no Greeks due to computational cost)
+        """
+        S = calibration_data['S']
+        r = calibration_data['r']
+        q = calibration_data['q']
+        T = calibration_data['T']
+
+        atm_iv = self._get_atm_implied_vol(calibration_data) or 0.25
+        simulations = 10000
+
+        results = {'prices': {}}
+
+        for strike in sorted(strikes):
+            # MC prices (American)
+            call_price = monte_carlo(S, strike, r, q, atm_iv, T, simulations, True, american=True)
+            put_price = monte_carlo(S, strike, r, q, atm_iv, T, simulations, False, american=True)
+
+            results['prices'][strike] = {'call': call_price, 'put': put_price}
+
+        return results
+
+    def _get_or_estimate_sabr_params(self, calibration_data):
+        """
+        Get previously calibrated SABR params or estimate defaults
+        """
+        # Try to get from cache first
+        symbol = calibration_data.get('symbol')
+        if symbol and symbol in self.calibrated_params:
+            for expiry_data in self.calibrated_params[symbol].values():
+                if 'SABR' in expiry_data:
+                    return expiry_data['SABR'].get('params')
+
+        # Return reasonable defaults
+        return (0.3, 0.5, -0.4, 0.5)  # (alpha, beta, rho, nu)
+
+    def _get_or_estimate_heston_params(self, calibration_data):
+        """
+        Get previously calibrated Heston params or estimate defaults
+        """
+        # Try to get from cache first
+        symbol = calibration_data.get('symbol')
+        if symbol and symbol in self.calibrated_params:
+            for expiry_data in self.calibrated_params[symbol].values():
+                if 'Heston' in expiry_data:
+                    return expiry_data['Heston'].get('params')
+
+        # Return reasonable defaults
+        hist_vol = self._get_historical_volatility(symbol) if symbol else 0.25
+        v0 = hist_vol ** 2
+        return (2.0, v0, 0.3, -0.5, v0)  # (kappa, theta, sigma, rho, v0)
+
+    def _get_atm_implied_vol(self, calibration_data):
+        """
+        Get ATM implied volatility from calibration data
+        """
+        S = calibration_data['S']
+        ivs = calibration_data.get('ivs', {})
+
+        # Find closest to ATM
+        min_diff = float('inf')
+        atm_iv = None
+
+        for (strike, opt_type), iv in ivs.items():
+            diff = abs(strike - S)
+            if diff < min_diff:
+                min_diff = diff
+                atm_iv = iv
+
+        return atm_iv
+
     # SABR Calibration
     def _calibrate_sabr(self, symbol, expiry, calibration_data):
         """
-        Main SABR calibration entry point
-        Returns calibrated (alpha, beta, rho, nu) or None
+        SABR calibration with Greeks for all models stored
         """
         try:
             market_data = self._prepare_sabr_market_data(calibration_data)
@@ -540,7 +956,7 @@ class CalibrationService:
             # Fixed beta for equities
             beta = 0.5
 
-            # Call C++ calibration
+            # Call C++ SABR calibration
             alpha, beta_out, rho, nu = sabr_calibrate(
                 market_data['ivs'],
                 market_data['strikes'],
@@ -560,13 +976,23 @@ class CalibrationService:
             if not self._accept_calibration(quality['rmse'], T, symbol, expiry):
                 return None
 
+            # Calculate prices and Greeks for ALL models, not just SABR
+            all_model_results = self._calculate_all_model_prices_and_greeks(
+                calibration_data, params, 'SABR'
+            )
+
+            # Store original market prices
+            market_prices = self._extract_market_prices(calibration_data)
+
             return {
                 'params': params,
                 'spot_at_calibration': S,
                 'forward': F,
                 'time_to_expiry': T,
                 'rmse': quality['rmse'],
-                'calibration_time': dt.datetime.now().isoformat()
+                'calibration_time': dt.datetime.now().isoformat(),
+                'market_prices': market_prices,
+                'all_models': all_model_results  # Contains prices and Greeks for ALL models
             }
 
         except Exception as e:
@@ -720,11 +1146,21 @@ class CalibrationService:
             if not self._validate_heston_parameters(kappa, theta, sigma, rho, v0):
                 return None
 
+            # Calculate prices and Greeks for ALL models
+            all_model_results = self._calculate_all_model_prices_and_greeks(
+                calibration_data, tuple(result.x), 'Heston'
+            )
+
+            # Store original market prices
+            market_prices = self._extract_market_prices(calibration_data)
+
             return {
                 'params': tuple(result.x),
                 'spot_at_calibration': S,
                 'rmse': np.sqrt(result.fun / len(all_market_data['market_prices'])),
-                'calibration_time': dt.datetime.now().isoformat()
+                'calibration_time': dt.datetime.now().isoformat(),
+                'market_prices': market_prices,
+                'all_models': all_model_results
             }
 
         except Exception as e:
@@ -734,7 +1170,7 @@ class CalibrationService:
     def _prepare_heston_market_data(self, symbol):
         """Prepare data across all expiries for Heston"""
         all_data = {
-            'spot': self.spot_prices.get(symbol),
+            'spot': self.spot_prices.get(symbol, {}).get('price'),
             'strikes': [],
             'expiries': [],
             'market_prices': [],
@@ -826,7 +1262,7 @@ class CalibrationService:
             if not surface or len(surface) < 10:
                 return None
 
-            S = self.spot_prices[symbol]
+            S = self.spot_prices[symbol]['price']
 
             # Create grid
             strikes = sorted(set(p['K'] for p in surface))
@@ -864,7 +1300,7 @@ class CalibrationService:
         if symbol not in self.option_chains:
             return None
 
-        S = self.spot_prices.get(symbol)
+        S = self.spot_prices.get(symbol, {}).get('price')
         if not S:
             return None
 
@@ -1093,7 +1529,7 @@ class CalibrationService:
     def _calculate_time_to_maturity(self, expiry_string):
         """Convert expiry to years"""
         try:
-            expiry = dt.datetime.strptime(expiry_string, '%Y-%m-%d %H:%M:%S')
+            expiry = dt.datetime.strptime(expiry_string, '%Y-%m-%d')
             now = dt.datetime.now()
 
             if now >= expiry:
@@ -1222,6 +1658,77 @@ class CalibrationService:
             else:
                 return self.calibrated_params.get(symbol)
 
+    def get_calibrated_prices_and_greeks(self, symbol, expiry=None, model='SABR', strike=None):
+        """
+        Public method to get calibrated option prices and Greeks
+
+        Parameters:
+        symbol: Stock symbol
+        expiry: Option expiry date (optional)
+        model: Model type ('SABR', 'Heston', 'LocalVol')
+        strike: Specific strike price (optional)
+
+        Returns:
+        Dictionary with market prices, calibrated prices, and Greeks
+        """
+        with self.data_lock:
+            if symbol not in self.calibrated_params:
+                return None
+
+            if expiry and model:
+                calibration = self.calibrated_params.get(symbol, {}).get(expiry, {}).get(model)
+                if not calibration:
+                    return None
+
+                if strike:
+                    # Return data for specific strike across all models
+                    result = {
+                        'spot_at_calibration': calibration['spot_at_calibration'],
+                        'market_price': calibration['market_prices'].get(strike),
+                        'models': {}
+                    }
+
+                    # Get data for each model
+                    if 'all_models' in calibration:
+                        for model_name, model_data in calibration['all_models'].items():
+                            if strike in model_data.get('prices', {}):
+                                result['models'][model_name] = {
+                                    'prices': model_data['prices'][strike],
+                                    'greeks': model_data.get('greeks', {}).get(strike, {})
+                                }
+
+                    return result
+                else:
+                    # Return all strikes
+                    return {
+                        'spot_at_calibration': calibration['spot_at_calibration'],
+                        'market_prices': calibration['market_prices'],
+                        'all_models': calibration.get('all_models', {})
+                    }
+            else:
+                # Return summary of all calibrations for symbol
+                return self.calibrated_params.get(symbol)
+
+    def get_model_comparison(self, symbol, expiry, strike):
+        """
+        Get prices and Greeks across all models for a specific option
+        """
+        with self.data_lock:
+            results = {}
+
+            # Get calibrations for this symbol/expiry
+            if symbol in self.calibrated_params and expiry in self.calibrated_params[symbol]:
+                for model, data in self.calibrated_params[symbol][expiry].items():
+                    if 'all_models' in data:
+                        for model_name, model_results in data['all_models'].items():
+                            if strike in model_results.get('prices', {}):
+                                results[model_name] = {
+                                    'prices': model_results['prices'][strike],
+                                    'greeks': model_results.get('greeks', {}).get(strike, {})
+                                }
+
+            return results
+
     def get_volatility_surface(self, symbol):
         """Get volatility surface for symbol"""
         with self.data_lock:
@@ -1266,6 +1773,15 @@ if __name__ == "__main__":
             params = service.get_calibrated_params('SPY')
             if params:
                 print(f"SPY calibrations: {len(params)} expiries")
+
+                # Get model comparison for specific strike
+                for expiry in params.keys():
+                    comparison = service.get_model_comparison('SPY', expiry, 670)
+                    if comparison:
+                        print(f"\nModel comparison for SPY {expiry} strike 670:")
+                        for model, data in comparison.items():
+                            if 'prices' in data:
+                                print(f"  {model}: Call=${data['prices']['call']:.2f}, Put=${data['prices']['put']:.2f}")
 
     except KeyboardInterrupt:
         print("Shutting down...")
