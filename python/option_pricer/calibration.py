@@ -1,6 +1,7 @@
 """
 Complete Multi-Model Options Calibration Service
 Implements SABR, Heston, Merton Jump Diffusion, and Local Volatility models
+FIXED: Now processes more expiries per symbol
 """
 
 import threading as th
@@ -117,7 +118,8 @@ class CalibrationService:
         config = config or {}
         self.calibration_interval = config.get('calibration_interval', 30)
         self.min_data_points = 3
-        self.max_calibrations_per_cycle = config.get('max_calibrations', 20)
+        self.max_calibrations_per_cycle = config.get('max_calibrations', 50)  # INCREASED from 20
+        self.max_expiries_per_symbol = config.get('max_expiries_per_symbol', 8)  # NEW: limit expiries per symbol
 
         # File tracking
         self.file_timestamps = {}
@@ -166,6 +168,7 @@ class CalibrationService:
         print("\n" + "="*80)
         print("SERVICE STARTED SUCCESSFULLY")
         print(f"Calibration interval: {self.calibration_interval} seconds")
+        print(f"Max expiries per symbol: {self.max_expiries_per_symbol}")
         print("="*80 + "\n")
 
     def stop(self):
@@ -225,7 +228,8 @@ class CalibrationService:
             if symbol not in self.option_chains:
                 continue
 
-            expiries = list(self.option_chains[symbol].keys())[:2]
+            # Process more expiries initially
+            expiries = list(self.option_chains[symbol].keys())[:5]  # INCREASED from 2 to 5
             for expiry in expiries:
                 ivs = self._calculate_all_implied_vols(symbol, expiry)
                 if ivs:
@@ -740,21 +744,19 @@ class CalibrationService:
         calibration_count = 0
         errors_by_model = {'SABR': [], 'Heston': [], 'Merton': [], 'LocalVol': []}
 
-        # Limit calibrations per cycle
-        symbols_to_process = self.symbols[:self.max_calibrations_per_cycle]
-
-        for symbol in symbols_to_process:
+        # Process ALL symbols (not limited)
+        for symbol in self.symbols:
             if symbol not in self.option_chains:
                 continue
 
-            # Get valid expiries
+            # Get ALL valid expiries (up to max_expiries_per_symbol)
             valid_expiries = []
-            for expiry in list(self.option_chains[symbol].keys())[:5]:
+            all_expiries = list(self.option_chains[symbol].keys())
+
+            for expiry in all_expiries[:self.max_expiries_per_symbol]:  # Process up to 8 expiries
                 T = self._calculate_time_to_maturity(expiry)
                 if T and T > 1/365:
                     valid_expiries.append(expiry)
-                    if len(valid_expiries) >= 2:
-                        break
 
             for expiry in valid_expiries:
                 # Calculate IVs if needed
@@ -861,9 +863,10 @@ class CalibrationService:
             with open(filename, 'w') as f:
                 json.dump(output, f, indent=2)
 
-            # Calculate file size
+            # Calculate file size and stats
             file_size = filename.stat().st_size / 1024
-            print(f"  Saved {len(viz_data)} symbols to calibrations.json ({file_size:.1f} KB)")
+            total_expiries = sum(len(expiries) for expiries in viz_data.values())
+            print(f"  Saved {len(viz_data)} symbols, {total_expiries} expiries to calibrations.json ({file_size:.1f} KB)")
 
         except Exception as e:
             print(f"Error saving: {e}")
@@ -915,7 +918,8 @@ if __name__ == "__main__":
         symbols=symbols,
         config={
             'calibration_interval': 30,
-            'max_calibrations': 20
+            'max_calibrations': 100,  # Process more calibrations
+            'max_expiries_per_symbol': 8  # Up to 8 expiries per symbol
         }
     )
 
